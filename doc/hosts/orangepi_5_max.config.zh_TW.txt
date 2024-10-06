@@ -1,0 +1,162 @@
+於本文件中描述如何設定、修改與測試LiteX-M2SDR。可分為三個部份。
+
+初始階段：
+
+  請依照OrangePi 5 Max官方提供的手冊中的方式進行安裝。請到以下網址，下載相關所需資源。
+  http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-Pi-5-Max.html
+
+  於本文件中，使用的安裝影像檔案為，Orangepi5max_1.0.0_ubuntu_jammy_server_linux6.1.43.7z
+  可於官方提供之Google Drive網址中取得。網址為
+  https://drive.google.com/drive/folders/1qSA5yr_UOll3LKMzdn74i_SCYygnIcJ8
+
+  初次登入系統後，請執行以下命令，進行相關更新：
+  sudo apt update
+  sudo apt upgrade
+  sudo reboot
+
+  待更新完成，重新開機後，登入系統安裝以下套件：
+  sudo apt install -y mc joe
+
+  之後請使用uname -a查看當前Linux Kernel版本編號。輸出訊息如下所示：
+  Linux orangepi5max 6.1.43-rockchip-rk3588 #1.0.0 SMP Mon Jul  8 11:54:40 CST 2024 aarch64 aarch64 aarch64 GNU/Linux
+
+  注意：Linux Kernel版本編號會隨著挑選的安裝影像檔案不同而有所不同。請以實際輸出為準。
+
+  之後請參考使用手冊中，Ch6 Linux開發手冊中， Ch6.1章節進行Linux kernel原始碼下載。
+
+  注意：Linux Kernel版本分支需取用與uname -a查詢輸出訊息之同樣的版本。
+  
+  依照以下步驟進行下載Linux Kernel原始碼。
+  cd /usr/src
+  sudo git clone --depth=1 -b orange-pi-6.1-rk35xx https://github.com/orangepi-xunlong/linux-orangepi
+  sudo chown -R orangepi.orangepi linux-orangepi
+  cd linux-orangepi
+  git pull
+  make rockchip_linux_defconfig
+  cp /proc/config.gz .
+  gzip -d config.gz
+  mv config .config
+  
+  之後使用joe或者是其他文字編輯器對.config檔案中找尋CONFIG_LOCALVERSION，將其設定值，修改為如下：
+  CONFIG_LOCALVERSION="-rockchip-rk3588"
+
+  接著使用make -j 8進行Linux Kernel編譯。此時不需要進行Linux Kernel影像檔更新之類的動作。
+  當編譯完成後，執行以下的命令：
+  sudo ln -sf /usr/src/linux-orangepi build
+
+
+  接下來可進行LiteX-M2SDR相關安裝，請依照以下的順序進行。於此階段，還未能正確驅動LiteX-M2SDR版卡，此為正常狀況。
+  於修改階段完成後，重新開機即可見到成功驅動的相關訊息。
+  cd $HOME
+  mkdir work
+  cd work
+  git clone https://github.com/enjoy-digital/litex_m2sdr
+  cd litex_m2sdr/software/kernel
+  sudo ARCH=arm64 ./init.sh
+  cd ..
+  sudo apt install -y cmake soapysdr-tools libsoapysdr0.8 libsoapysdr-dev python3-numpy
+  ./build.py
+  git status
+
+  至此完成相關設定，接下來進入修改階段。
+
+修改階段：
+
+  於此階段，需針對OrangePi 5 Max的Device Tree設定進行相關更新。請依照以下順序進行。
+  cd /boot/dtb/rockchip
+  sudo cp rk3588-orangepi-5-max.dtb rk3588-orangepi-5-max.orig.dtb
+  sudo dtc rk3588-orangepi-5-max.dtb -o rk3588-orangepi-5-max.dts
+  sudo joe rk3588-orangepi-5-max.dts
+  找尋pcie@fe150000區段中的num-lanes，將其設定值從<0x04>改為<0x02>，存檔。
+  sudo dtc rk3588-orangepi-5-max.dts -o rk3588-orangepi-5-max.dtb
+  
+  完成後進行重新開機。
+  sync;sync;sync;sudo reboot
+
+  待登入系統後，確認以下事項，確認是否修改成功。
+  dmesg |grep fe150000，確認出現以下訊息。
+  [    6.267234] rk-pcie fe150000.pcie: invalid prsnt-gpios property in node
+  [    6.283941] rk-pcie fe150000.pcie: host bridge /pcie@fe150000 ranges:
+  [    6.283978] rk-pcie fe150000.pcie:       IO 0x00f0100000..0x00f01fffff -> 0x00f0100000
+  [    6.284028] rk-pcie fe150000.pcie:      MEM 0x00f0200000..0x00f0ffffff -> 0x00f0200000
+  [    6.284054] rk-pcie fe150000.pcie:      MEM 0x0900000000..0x093fffffff -> 0x0900000000
+  [    6.284115] rk-pcie fe150000.pcie: iATU unroll: enabled
+  [    6.284122] rk-pcie fe150000.pcie: iATU regions: 8 ob, 8 ib, align 64K, limit 8G
+  [    6.489335] rk-pcie fe150000.pcie: PCIe Linking... LTSSM is 0x3
+  [    6.514894] rk-pcie fe150000.pcie: PCIe Linking... LTSSM is 0x4
+  [    6.598237] rk-pcie fe150000.pcie: PCIe Link up, LTSSM is 0x130011
+  [    6.598246] rk-pcie fe150000.pcie: PCIe Gen.2 x1 link up
+  [    6.598318] rk-pcie fe150000.pcie: PCI host bridge to bus 0000:00
+
+  dmesg |grep "pci 0000:00"
+  [    6.598362] pci 0000:00:00.0: [1d87:3588] type 01 class 0x060400
+  [    6.598375] pci 0000:00:00.0: reg 0x10: [mem 0x00000000-0x3fffffff]
+  [    6.598383] pci 0000:00:00.0: reg 0x14: [mem 0x00000000-0x3fffffff]
+  [    6.598390] pci 0000:00:00.0: reg 0x38: [mem 0x00000000-0x0000ffff pref]
+  [    6.598432] pci 0000:00:00.0: supports D1 D2
+  [    6.598436] pci 0000:00:00.0: PME# supported from D0 D1 D3hot
+  [    6.605053] pci 0000:00:00.0: BAR 0: no space for [mem size 0x40000000]
+  [    6.605060] pci 0000:00:00.0: BAR 0: failed to assign [mem size 0x40000000]
+  [    6.605066] pci 0000:00:00.0: BAR 1: no space for [mem size 0x40000000]
+  [    6.605071] pci 0000:00:00.0: BAR 1: failed to assign [mem size 0x40000000]
+  [    6.605076] pci 0000:00:00.0: BAR 8: assigned [mem 0xf0200000-0xf02fffff]
+  [    6.605081] pci 0000:00:00.0: BAR 6: assigned [mem 0xf0300000-0xf030ffff pref]
+  [    6.605103] pci 0000:00:00.0: PCI bridge to [bus 01-ff]
+  [    6.605110] pci 0000:00:00.0:   bridge window [mem 0xf0200000-0xf02fffff]
+
+  lspci，確認出現以下訊息。
+  0000:00:00.0 PCI bridge: Rockchip Electronics Co., Ltd Device 3588 (rev 01)
+  0000:01:00.0 RF controller: Xilinx Corporation Device 7024
+  0003:30:00.0 PCI bridge: Rockchip Electronics Co., Ltd Device 3588 (rev 01)
+  0003:31:00.0 Ethernet controller: Realtek Semiconductor Co., Ltd. RTL8125 2.5GbE Controller (rev 05)
+  出現"RF controller: Xilinx Corporation Device 7024" 即為系統偵測到LiteX-M2SDR版卡。
+
+  以上三種訊息均出現，即可進行測試階段。
+
+測試階段：
+  
+  依照以下命令順序進行相關測試：
+  sudo insmod ~/work/litex_m2sdr/software/kernel/litepcie.ko
+  sudo chmod 666 /dev/m2sdr0
+
+  使用dmesg，確認出現以下訊息：
+  [ 2999.724330] litepcie: loading out-of-tree module taints kernel.
+  [ 2999.725121] litepcie 0000:01:00.0: \x1b[1m[Probing device]\x1b[0m
+  [ 2999.725143] litepcie 0000:01:00.0: enabling device (0000 -> 0002)
+  [ 2999.745151] litepcie 0000:01:00.0: Version LiteX-M2SDR SoC / m2 variant / built on 2024-09-05 17:46:29
+  [ 2999.745434] litepcie 0000:01:00.0: 1 MSI IRQs allocated.
+  [ 2999.745500] litepcie 0000:01:00.0: Creating /dev/m2sdr0
+
+  執行~/work/litex_m2sdr/software/user/m2sdr_util info，會出現以下訊息：
+  [> FPGA/SoC Info:
+  -----------------
+  SoC Identifier   : LiteX-M2SDR SoC / m2 variant / built on 2024-09-05 17:46:29.
+  FPGA DNA         : 0x0038cc0c7af9e854
+  FPGA Temperature : 49.5 °C
+  FPGA VCC-INT     : 1.00 V
+  FPGA VCC-AUX     : 1.79 V
+  FPGA VCC-BRAM    : 1.00 V
+  FPGA Status      : Operational
+
+  [> AD9361 Info:
+  ---------------
+  AD9361 Product ID  : 000a
+  AD9361 Temperature : 0.0 °C
+
+  執行~/work/litex_m2sdr/software/user/m2sdr_rf，會出現以下訊息：
+  Initializing SI5351 Clocking...
+  Using internal XO for as SI5351 RefClk...
+  Initializing AD9361 SPI...
+  Initializing AD9361 RFIC...
+  Setting Channel Mode to 2T2R.
+  ad9361_init : AD936x Rev 2 successfully initialized
+  Setting TX/RX Samplerate to 30.720000 MSPS.
+  Setting TX/RX Bandwidth to 56.000000 MHz.
+  Setting TX LO Freq to 98.200000 MHz.
+  Setting RX LO Freq to 98.200000 MHz.
+  Setting TX Gain to -20 dB.
+  Setting RX Gain to 0 dB.
+  Setting Loopback to 0
+  Enabling 16-bit mode.
+
+  到這邊，已經完成LiteX-M2SDR版卡安裝。
