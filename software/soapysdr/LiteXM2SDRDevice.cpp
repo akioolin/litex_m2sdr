@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <memory>
 #include <sys/mman.h>
+#include <arpa/inet.h>
 
 #include "ad9361/platform.h"
 #include "ad9361/ad9361.h"
@@ -77,10 +78,15 @@ int spi_write_then_read(struct spi_device * /*spi*/,
 
 #define eb_writel(_eb, _addr, _val) eb_write32(_eb, _val, _addr)
 void eb_m2sdr_ad9361_spi_xfer(struct eb_connection *eb, uint8_t len, uint8_t *mosi, uint8_t *miso) {
+    bool is_write;
     eb_writel(eb, CSR_AD9361_SPI_MOSI_ADDR, mosi[0] << 16 | mosi[1] << 8 | mosi[2]);
     eb_writel(eb, CSR_AD9361_SPI_CONTROL_ADDR, 24*SPI_CONTROL_LENGTH | SPI_CONTROL_START);
-    while ((eb_read32(eb, CSR_AD9361_SPI_STATUS_ADDR) & 0x1) != SPI_STATUS_DONE);
-    miso[2] = eb_read32(eb, CSR_AD9361_SPI_MISO_ADDR) & 0xff;
+    /* Omit polling the SPI_STATUS_DONE flag to reduce Etherbone round-trip latency */
+    /* while ((eb_read32(eb, CSR_AD9361_SPI_STATUS_ADDR) & 0x1) != SPI_STATUS_DONE); */
+    is_write = (mosi[0] & 0x80) != 0;
+    if (!is_write) {
+        miso[2] = eb_read32(eb, CSR_AD9361_SPI_MISO_ADDR) & 0xff;
+    }
 }
 
 void eb_m2sdr_ad9361_spi_write(struct eb_connection *eb, uint16_t reg, uint8_t dat) {
@@ -176,6 +182,40 @@ void gpio_set_value(unsigned /*gpio*/, int /*value*/){}
  *                                     Constructor
  **************************************************************************************************/
 
+static std::string getLocalIPAddressToReach(const std::string &remote_ip, uint16_t remote_port)
+{
+    struct sockaddr_in remote_addr;
+    memset(&remote_addr, 0, sizeof(remote_addr));
+    remote_addr.sin_family = AF_INET;
+    remote_addr.sin_port = htons(remote_port);
+    if (inet_pton(AF_INET, remote_ip.c_str(), &remote_addr.sin_addr) != 1)
+        throw std::runtime_error("Invalid remote IP address");
+
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0)
+        throw std::runtime_error("Failed to create socket");
+
+    if (connect(sock, (struct sockaddr*)&remote_addr, sizeof(remote_addr)) < 0) {
+        close(sock);
+        throw std::runtime_error("Failed to connect socket");
+    }
+
+    struct sockaddr_in local_addr;
+    socklen_t addr_len = sizeof(local_addr);
+    if (getsockname(sock, (struct sockaddr*)&local_addr, &addr_len) < 0) {
+        close(sock);
+        throw std::runtime_error("getsockname() failed");
+    }
+
+    close(sock);
+
+    char buf[INET_ADDRSTRLEN];
+    if (!inet_ntop(AF_INET, &local_addr.sin_addr, buf, sizeof(buf)))
+        throw std::runtime_error("inet_ntop failed");
+
+    return std::string(buf);
+}
+
 #ifndef WITH_ETH_CTRL
 std::string getLiteXM2SDRSerial(int fd);
 std::string getLiteXM2SDRIdentification(int fd);
@@ -251,11 +291,29 @@ SoapyLiteXM2SDR::SoapyLiteXM2SDR(const SoapySDR::Kwargs &args)
     } catch (std::exception &e) {
         throw std::runtime_error("can't prepare UDP RX Receiver");
     }
+
 #ifndef WITH_ETH_CTRL
     SoapySDR::logf(SOAPY_SDR_INFO, "Opened devnode %s, serial %s", eth_ip.c_str(), getLiteXM2SDRSerial(_fd).c_str());
 #else
     SoapySDR::logf(SOAPY_SDR_INFO, "Opened devnode %s, serial %s", eth_ip.c_str(), getLiteXM2SDRSerial(_eb_fd).c_str());
 #endif
+
+    /* Ethernet FPGA streamer configuration */
+
+    /* Determine the local IP that the board sees */
+    std::string local_ip = getLocalIPAddressToReach(eth_ip, 1234);
+
+    struct in_addr ip_addr_struct;
+    if (inet_pton(AF_INET, local_ip.c_str(), &ip_addr_struct) != 1) {
+        throw std::runtime_error("Invalid local IP address determined");
+    }
+
+    uint32_t ip_addr_val = ntohl(ip_addr_struct.s_addr);
+
+    /* Write the PC's IP to the FPGA's ETH_STREAMER IP register */
+    eb_write32(_eb_fd, ip_addr_val, CSR_ETH_STREAMER_IP_ADDRESS_ADDR);
+
+    SoapySDR::logf(SOAPY_SDR_INFO, "Using local IP: %s for streaming", local_ip.c_str());
 #endif
 
     /* Configure Mode based on _bitMode */

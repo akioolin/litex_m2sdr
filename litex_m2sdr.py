@@ -45,6 +45,7 @@ from litesata.phy import LiteSATAPHY
 from litescope import LiteScopeAnalyzer
 
 from gateware.si5351      import SI5351
+from gateware.si5351_i2c  import SI5351I2C, i2c_program_si5351
 from gateware.ad9361.core import AD9361RFIC
 from gateware.qpll        import SharedQPLL
 from gateware.timestamp   import Timestamp
@@ -96,33 +97,36 @@ class CRG(LiteXModule):
 class BaseSoC(SoCMini):
     SoCCore.csr_map = {
         # SoC.
-        "ctrl"        : 0,
-        "uart"        : 1,
-        "icap"        : 2,
-        "flash"       : 3,
-        "xadc"        : 4,
-        "dna"         : 5,
-        "flash"       : 6,
-        "leds"        : 7,
+        "ctrl"            : 0,
+        "uart"            : 1,
+        "icap"            : 2,
+        "flash_cs_n"      : 3,
+        "xadc"            : 4,
+        "dna"             : 5,
+        "flash"           : 6,
+        "leds"            : 7,
+        "identifier_mem"  : 8,
+        "timer"           : 9,
 
         # PCIe.
-        "pcie_phy"    : 10,
-        "pcie_msi"    : 11,
-        "pcie_dma0"   : 12,
+        "pcie_phy"        : 10,
+        "pcie_msi"        : 11,
+        "pcie_dma0"       : 12,
 
         # Eth.
-        "eth_phy"     : 14,
+        "eth_phy"         : 14,
+        "eth_streamer"    : 15,
 
         # SATA.
-        "sata_phy"    : 15,
-        "sata_core"   : 16,
+        "sata_phy"        : 18,
+        "sata_core"       : 19,
 
         # SDR.
-        "si5351"      : 20,
-        "timestamp"   : 22,
-        "header"      : 23,
-        "ad9361"      : 24,
-        "crossbar"    : 25,
+        "si5351"          : 20,
+        "timestamp"       : 22,
+        "header"          : 23,
+        "ad9361"          : 24,
+        "crossbar"        : 25,
 
         # Measurements/Analyzer.
         "clk_measurement" : 30,
@@ -131,7 +135,7 @@ class BaseSoC(SoCMini):
 
     def __init__(self, variant="m2", sys_clk_freq=int(125e6),
         with_pcie     = True,  pcie_lanes=1,
-        with_eth      = False, eth_sfp=0, eth_phy="1000basex", eth_local_ip="192.168.1.50", eth_remote_ip="192.168.1.100", eth_udp_port=2345,
+        with_eth      = False, eth_sfp=0, eth_phy="1000basex", eth_local_ip="192.168.1.50", eth_udp_port=2345,
         with_sata     = False, sata_gen="gen2",
         with_jtagbone = True,
         with_rfic_oversampling = True,
@@ -171,7 +175,7 @@ class BaseSoC(SoCMini):
 
         # SI5351 Clock Generator -------------------------------------------------------------------
 
-        self.si5351 = SI5351(platform, clk_in=platform.request("sync_clk_in"))
+        self.si5351 = SI5351(platform, sys_clk_freq=sys_clk_freq, clk_in=platform.request("sync_clk_in"))
         si5351_clk0 = platform.request("si5351_clk0")
 
         # JTAGBone ---------------------------------------------------------------------------------
@@ -253,6 +257,8 @@ class BaseSoC(SoCMini):
                 rx_polarity  = 1, # Inverted on M2SDR.
                 tx_polarity  = 0, # Inverted on M2SDR and Acorn Baseboard Mini.
             )
+            platform.add_period_constraint(self.eth_phy.txoutclk, 1e9/(self.eth_phy.tx_clk_freq/2))
+            platform.add_period_constraint(self.eth_phy.rxoutclk, 1e9/(self.eth_phy.tx_clk_freq/2))
 
             # Core + MMAP (Etherbone).
             self.add_etherbone(phy=self.eth_phy, ip_address=eth_local_ip, data_width=32, arp_entries=4)
@@ -260,10 +266,10 @@ class BaseSoC(SoCMini):
             # UDP Streamer RX.
             eth_streamer_port = self.ethcore_etherbone.udp.crossbar.get_port(eth_udp_port, dw=64, cd="sys")
             self.eth_streamer = LiteEthStream2UDPTX(
-                ip_address = convert_ip(eth_remote_ip),
                 udp_port   = eth_udp_port,
                 fifo_depth = 1024//8,
                 data_width = 64,
+                with_csr   = True,
             )
             self.comb += self.eth_streamer.source.connect(eth_streamer_port.sink)
 
@@ -468,7 +474,6 @@ def main():
     parser.add_argument("--eth-sfp",         default=0, type=int,     help="Ethernet SFP.", choices=[0, 1])
     parser.add_argument("--eth-phy",         default="1000basex",     help="Ethernet PHY.", choices=["1000basex", "2500basex"])
     parser.add_argument("--eth-local-ip",    default="192.168.1.50",  help="Ethernet/Etherbone IP address.")
-    parser.add_argument("--eth-remote-ip",   default="192.168.1.100", help="Ethernet Remote IP address.")
     parser.add_argument("--eth-udp-port",    default=2345, type=int,  help="Ethernet Remote port.")
 
     # SATA parameters.
@@ -497,7 +502,6 @@ def main():
         eth_sfp       = args.eth_sfp,
         eth_phy       = args.eth_phy,
         eth_local_ip  = args.eth_local_ip,
-        eth_remote_ip = args.eth_remote_ip,
         eth_udp_port  = args.eth_udp_port,
 
         # SATA.
