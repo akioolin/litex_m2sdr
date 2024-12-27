@@ -28,23 +28,22 @@ def build_driver(path, cmake_options=""):
         run_command(command)
 
 parser = argparse.ArgumentParser(description="LiteX-M2SDR Software build.", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument("--control-path", default="pcie", help="Control path interface", choices=["pcie", "eth"])
-parser.add_argument("--data-path",    default="pcie", help="Data path interface",    choices=["pcie", "eth"])
+parser.add_argument("--interface", default="liteeth", help="Control/Data path interface", choices=["litepcie", "liteeth"])
 
 args = parser.parse_args()
 
-# Control path flag.
-if args.control_path == "pcie":
-    control_path = "-DWITH_ETH_CTRL=OFF"
+# Control/Data path flags.
+if args.interface == "litepcie":
+    flags = "-DUSE_LITEETH=OFF"
 else:
-    control_path = "-DWITH_ETH_CTRL=ON"
+    flags = "-DUSE_LITEETH=ON"
 
-# Data path flag.
-if args.data_path == "pcie":
-    data_path = "-DWITH_ETH_STREAM=OFF"
-else:
-    data_path = "-DWITH_ETH_STREAM=ON"
+# Kernel compilation.
+if (args.interface == "litepcie"):
+    run_command("cd kernel && make clean all")
 
-run_command("cd kernel && make clean all")
+# Utilities compilation.
 run_command("cd user   && make clean all")
-build_driver("soapysdr", f"-DCMAKE_INSTALL_PREFIX=/usr {data_path} {control_path}")
+
+# SoapySDR Driver compilation.
+build_driver("soapysdr", f"-DCMAKE_INSTALL_PREFIX=/usr {flags}")

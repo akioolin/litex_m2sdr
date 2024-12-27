@@ -26,40 +26,22 @@
 #define LITEX_IDENTIFIER      "LiteX-M2SDR"
 
 std::string readFPGAData(
-#ifndef WITH_ETH_CTRL
-    int fd,
-#else
-    struct eb_connection *fd,
-#endif
+    litex_m2sdr_device_desc_t fd,
     unsigned int baseAddr,
     size_t size) {
     std::string data(size, 0);
     for (size_t i = 0; i < size; i++)
-#ifndef WITH_ETH_CTRL
-        data[i] = static_cast<char>(litepcie_readl(fd, baseAddr + 4 * i));
-#else
-        data[i] = static_cast<char>(eb_read32(fd, baseAddr + 4 * i));
-#endif
+        data[i] = static_cast<char>(litex_m2sdr_readl(fd, baseAddr + 4 * i));
     return data;
 }
 
-#ifndef WITH_ETH_CTRL
-std::string getLiteXM2SDRIdentification(int fd) {
-#else
-std::string getLiteXM2SDRIdentification(struct eb_connection *fd) {
-#endif
+std::string getLiteXM2SDRIdentification(litex_m2sdr_device_desc_t fd) {
     return readFPGAData(fd, CSR_IDENTIFIER_MEM_BASE, LITEX_IDENTIFIER_SIZE);
 }
 
-#ifndef WITH_ETH_CTRL
-std::string getLiteXM2SDRSerial(int fd) {
-    unsigned int high = litepcie_readl(fd, CSR_DNA_ID_ADDR);
-    unsigned int low  = litepcie_readl(fd, CSR_DNA_ID_ADDR + 4);
-#else
-std::string getLiteXM2SDRSerial(struct eb_connection *fd) {
-    unsigned int high = eb_read32(fd, CSR_DNA_ID_ADDR);
-    unsigned int low  = eb_read32(fd, CSR_DNA_ID_ADDR + 4);
-#endif
+std::string getLiteXM2SDRSerial(litex_m2sdr_device_desc_t fd) {
+    unsigned int high = litex_m2sdr_readl(fd, CSR_DNA_ID_ADDR);
+    unsigned int low  = litex_m2sdr_readl(fd, CSR_DNA_ID_ADDR + 4);
     char serial[32];
     snprintf(serial, sizeof(serial), "%x%08x", high, low);
     return std::string(serial);
@@ -73,21 +55,15 @@ std::string generateDeviceLabel(
 }
 
 SoapySDR::Kwargs createDeviceKwargs(
-#ifndef WITH_ETH_CTRL
-    int fd,
-#else
-    struct eb_connection *fd,
-#endif
+    litex_m2sdr_device_desc_t fd,
     const std::string &path,
     const std::string &eth_ip) {
     SoapySDR::Kwargs dev = {
         {"device",         "LiteX-M2SDR"},
-#if defined(WITH_ETH_CTRL) || defined(WITH_ETH_STREAM)
+#ifdef USE_LITEETH
         {"eth_ip",         eth_ip},
 #endif
-#if not (defined(WITH_ETH_CTRL) && defined(WITH_ETH_STREAM))
         {"path",           path},
-#endif
         {"serial",         getLiteXM2SDRSerial(fd)},
         {"identification", getLiteXM2SDRIdentification(fd)},
         {"version",        "1234"},
@@ -106,7 +82,7 @@ std::vector<SoapySDR::Kwargs> findLiteXM2SDR(
     std::string eth_ip = "192.168.1.50";
     std::string path   = "/dev/m2sdr0";
 
-#if defined(WITH_ETH_CTRL) || defined(WITH_ETH_STREAM)
+#ifdef USE_LITEETH
     if (args.count("eth_ip") == 0) {
         std::cout << "When using ethernet mode eth_ip parameter is required\n";
         //throw std::runtime_error("plop");
@@ -115,7 +91,7 @@ std::vector<SoapySDR::Kwargs> findLiteXM2SDR(
     }
 #endif
 
-#ifndef WITH_ETH_CTRL
+#ifndef USE_LITEETH
     auto attemptToAddDevice = [&](const std::string &path, const std::string &eth_ip) {
         int fd = open(path.c_str(), O_RDWR);
         if (fd < 0) return false;
@@ -138,7 +114,7 @@ std::vector<SoapySDR::Kwargs> findLiteXM2SDR(
         }
     }
 #else
-#ifndef WITH_ETH_STREAM
+#ifndef USE_LITEETH
     if (args.count("path") == 0) {
         std::cout << "When using ethernet for control and PCIe for stream path parameter is required\n";
         //throw std::runtime_error("plop");
