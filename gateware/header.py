@@ -1,7 +1,7 @@
 #
 # This file is part of LiteX-M2SDR.
 #
-# Copyright (c) 2024 Enjoy-Digital <enjoy-digital.fr>
+# Copyright (c) 2024-2025 Enjoy-Digital <enjoy-digital.fr>
 # SPDX-License-Identifier: BSD-2-Clause
 
 from migen import *
@@ -38,12 +38,16 @@ class HeaderInserterExtracter(LiteXModule):
         # # #
 
         # Signals.
+        # --------
         first  = Signal()
         cycles = Signal(32)
 
         # FSM.
+        # ----
         self.fsm = fsm = ResetInserter()(FSM(reset_state="RESET"))
         self.comb += self.fsm.reset.eq(self.reset | ~self.enable)
+
+        # Reset.
         fsm.act("RESET",
             NextValue(first,  1),
             NextValue(cycles, 0),
@@ -52,6 +56,8 @@ class HeaderInserterExtracter(LiteXModule):
             ),
             NextState("IDLE")
         )
+
+        # Idle.
         fsm.act("IDLE",
             NextValue(cycles, 0),
             If(self.header_enable,
@@ -60,7 +66,30 @@ class HeaderInserterExtracter(LiteXModule):
                 NextState("FRAME")
             )
         )
+
+        # Inserter specific.
+        if mode == "inserter":
+            # Header.
+            fsm.act("HEADER",
+                source.valid.eq(1),
+                source.first.eq(1),
+                source.data[0:64].eq(self.header),
+                If(source.valid & source.ready,
+                    NextState("TIMESTAMP"),
+                )
+            )
+            # Timestamp.
+            fsm.act("TIMESTAMP",
+                source.valid.eq(1),
+                source.data[0:64].eq(self.timestamp),
+                If(source.valid & source.ready,
+                    NextState("FRAME"),
+                )
+            )
+
+        # Extracter specific.
         if mode == "extracter":
+            # Header.
             fsm.act("HEADER",
                 sink.ready.eq(1),
                 If(sink.valid & sink.ready & (sink.first | ~first),
@@ -69,6 +98,7 @@ class HeaderInserterExtracter(LiteXModule):
                     NextState("TIMESTAMP")
                 )
             )
+            # Timestamp.
             fsm.act("TIMESTAMP",
                 sink.ready.eq(1),
                 If(sink.valid & sink.ready,
@@ -76,34 +106,25 @@ class HeaderInserterExtracter(LiteXModule):
                     NextState("FRAME")
                 )
             )
-        if mode == "inserter":
-            fsm.act("HEADER",
-                source.valid.eq(1),
-                source.data[0:64].eq(self.header),
-                If(source.valid & source.ready,
-                    NextState("TIMESTAMP"),
-                )
-            )
-            fsm.act("TIMESTAMP",
-                source.valid.eq(1),
-                source.data[0:64].eq(self.timestamp),
-                If(source.valid & source.ready,
-                    NextState("FRAME"),
-                )
-            )
+
+        # Frame.
         fsm.act("FRAME",
-            sink.connect(source),
+            sink.connect(source, omit={"first"}),
             NextValue(self.update, 0),
-            If(self.header_enable & source.valid & source.ready,
-                NextValue(cycles, cycles + 1),
-                If(cycles == (self.frame_cycles - 1),
-                    NextValue(cycles, 0),
-                    NextState("HEADER")
+            If(self.header_enable,
+                source.first.eq((cycles == 0) & (mode == "extracter")),
+                source.last.eq( cycles == (self.frame_cycles - 1)),
+                If(source.valid & source.ready,
+                    NextValue(cycles, cycles + 1),
+                    If(source.last,
+                        NextValue(cycles, 0),
+                        NextState("HEADER")
+                    )
                 )
             )
         )
 
-    def add_csr(self, default_enable=1, default_header_enable=0, default_frame_cycles=30.72e6*1e-3/2):
+    def add_csr(self, default_enable=1, default_header_enable=0, default_frame_cycles=8192/8 - 2):
         self._control = CSRStorage(fields=[
             CSRField("enable", size=1, offset=0, values=[
                 ("``0b0``", "Module Disabled."),

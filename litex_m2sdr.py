@@ -3,7 +3,7 @@
 #
 # This file is part of LiteX-M2SDR.
 #
-# Copyright (c) 2024 Enjoy-Digital <enjoy-digital.fr>
+# Copyright (c) 2024-2025 Enjoy-Digital <enjoy-digital.fr>
 # SPDX-License-Identifier: BSD-2-Clause
 
 import os
@@ -48,6 +48,8 @@ from gateware.si5351      import SI5351
 from gateware.si5351_i2c  import SI5351I2C, i2c_program_si5351
 from gateware.ad9361.core import AD9361RFIC
 from gateware.qpll        import SharedQPLL
+from gateware.time        import TimeGenerator
+from gateware.pps         import PPSGenerator
 from gateware.timestamp   import Timestamp
 from gateware.header      import TXRXHeader
 from gateware.measurement import MultiClkMeasurement
@@ -124,6 +126,7 @@ class BaseSoC(SoCMini):
 
         # SDR.
         "si5351"          : 20,
+        "time"            : 21,
         "timestamp"       : 22,
         "header"          : 23,
         "ad9361"          : 24,
@@ -154,8 +157,6 @@ class BaseSoC(SoCMini):
         SoCMini.__init__(self, platform, sys_clk_freq,
             ident         = f"LiteX-M2SDR SoC / {variant} variant / built on",
             ident_version = True,
-            with_timer    = True,
-            timer_uptime  = True
         )
 
         # Clocking ---------------------------------------------------------------------------------
@@ -178,6 +179,30 @@ class BaseSoC(SoCMini):
 
         self.si5351 = SI5351(platform, sys_clk_freq=sys_clk_freq, clk_in=platform.request("sync_clk_in"))
         si5351_clk0 = platform.request("si5351_clk0")
+        si5351_clk1 = platform.request("si5351_clk1")
+
+        # Time Generator ---------------------------------------------------------------------------
+
+        self.time_gen = TimeGenerator(
+            clk        = si5351_clk1,
+            clk_freq   = 100e6,
+            with_csr   = True,
+        )
+
+        # PPS Generator ----------------------------------------------------------------------------
+
+        self.pps_gen = ClockDomainsRenamer("time_gen_time")(PPSGenerator(
+            clk_freq = 100e6,
+            time     = self.time_gen.time,
+            reset    = self.time_gen.time_change,
+        ))
+        # FIXME: Improve.
+        pps_sys   = Signal()
+        pps_sys_d = Signal()
+        pps_rise  = Signal()
+        self.specials += MultiReg(self.pps_gen.pps, pps_sys)
+        self.sync += pps_sys_d.eq(pps_sys)
+        self.comb += pps_rise.eq(pps_sys & ~pps_sys_d)
 
         # JTAGBone ---------------------------------------------------------------------------------
 
@@ -241,7 +266,7 @@ class BaseSoC(SoCMini):
                 with_msi              = True
             )
             self.pcie_phy.use_external_qpll(qpll_channel=self.qpll.get_channel("pcie"))
-            self.comb += self.pcie_dma0.synchronizer.pps.eq(1)
+            self.comb += self.pcie_dma0.synchronizer.pps.eq(pps_rise)
 
         # Ethernet ---------------------------------------------------------------------------------
 
@@ -363,7 +388,9 @@ class BaseSoC(SoCMini):
         if with_sata:
             pass # TODO.
         self.comb += self.crossbar.mux.source.connect(self.header.tx.sink)
-
+        self.comb += If(self.crossbar.mux.sel == 0,
+            self.header.tx.reset.eq(~self.pcie_dma0.synchronizer.synced)
+        )
 
         # RX: Header -> Crossbar -> Comms.
         # --------------------------------
@@ -374,7 +401,9 @@ class BaseSoC(SoCMini):
             self.comb += self.crossbar.demux.source1.connect(self.eth_rx_streamer.sink)
         if with_sata:
             pass # TODO.
-
+        self.comb += If(self.crossbar.demux.sel == 0,
+            self.header.rx.reset.eq(~self.pcie_dma0.synchronizer.synced)
+        )
 
         # Timing Constraints/False Paths -----------------------------------------------------------
 
@@ -399,6 +428,7 @@ class BaseSoC(SoCMini):
 
             # Sync.
             "si5351_clk0",
+            "si5351_clk1",
             "sync_clk_in",
         )
 
@@ -409,6 +439,7 @@ class BaseSoC(SoCMini):
             "clk1" : 0 if not with_pcie else ClockSignal("pcie"),
             "clk2" : si5351_clk0,
             "clk3" : ClockSignal("rfic"),
+            "clk4" : si5351_clk1,
         })
 
     # LiteScope Probes (Debug) ---------------------------------------------------------------------
@@ -438,9 +469,12 @@ class BaseSoC(SoCMini):
     def add_pcie_dma_probe(self):
         assert hasattr(self, "pcie_dma0")
         analyzer_signals = [
+            self.pps_gen.pps,      # PPS.
             self.pcie_dma0.sink,   # RX.
             self.pcie_dma0.source, # TX.
             self.pcie_dma0.synchronizer.synced,
+            self.header.rx.reset,
+            self.header.tx.reset,
         ]
         self.analyzer = LiteScopeAnalyzer(analyzer_signals,
             depth        = 1024,

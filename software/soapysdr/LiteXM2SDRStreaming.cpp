@@ -1,7 +1,7 @@
 /*
  * SoapySDR driver for the LiteX M2SDR.
  *
- * Copyright (c) 2021-2024 Enjoy Digital.
+ * Copyright (c) 2021-2025 Enjoy Digital.
  * Copyright (c) 2021 Julia Computing.
  * Copyright (c) 2015-2015 Fairwaves, Inc.
  * Copyright (c) 2015-2015 Rice University
@@ -18,6 +18,12 @@
 #include "ad9361/ad9361_api.h"
 
 #include "LiteXM2SDRDevice.hpp"
+
+#if USE_LITEPCIE && defined(_RX_DMA_HEADER_TEST)
+static constexpr size_t RX_DMA_HEADER_SIZE = 16;
+#else
+static constexpr size_t RX_DMA_HEADER_SIZE = 0;
+#endif
 
 /* Setup and configure a stream for RX or TX. */
 SoapySDR::Stream *SoapyLiteXM2SDR::setupStream(
@@ -51,7 +57,7 @@ SoapySDR::Stream *SoapyLiteXM2SDR::setupStream(
 
         /* Get Buffer and Parameters from RX DMA Writer */
         _rx_stream.buf = _rx_stream.dma.buf_rd;
-        _rx_buf_size   = _rx_stream.dma.mmap_dma_info.dma_rx_buf_size;
+        _rx_buf_size   = _rx_stream.dma.mmap_dma_info.dma_rx_buf_size - RX_DMA_HEADER_SIZE;
         _rx_buf_count  = _rx_stream.dma.mmap_dma_info.dma_rx_buf_count;
 
         /* Ensure the DMA is disabled initially to avoid counters being in a bad state. */
@@ -254,7 +260,7 @@ int SoapyLiteXM2SDR::getDirectAccessBufferAddrs(
     const size_t handle,
     void **buffs) {
     if (stream == RX_STREAM) {
-        buffs[0] = (char *)_rx_stream.buf + handle * _dma_mmap_info.dma_rx_buf_size;
+        buffs[0] = (char *)_rx_stream.buf + handle * _dma_mmap_info.dma_rx_buf_size + RX_DMA_HEADER_SIZE;
     } else if (stream == TX_STREAM) {
         buffs[0] = (char *)_tx_stream.buf + handle * _dma_mmap_info.dma_tx_buf_size;
     } else {
@@ -292,7 +298,11 @@ int SoapyLiteXM2SDR::acquireReadBuffer(
     size_t &handle,
     const void **buffs,
     int &flags,
-    long long &/*timeNs*/,
+#if USE_LITEPCIE && defined(_RX_DMA_HEADER_TEST)
+     long long &timeNs,
+#else
+     long long &/*timeNs*/,
+#endif
     const long timeoutUs) {
     if (stream != RX_STREAM) {
         return SOAPY_SDR_STREAM_ERROR;
@@ -369,6 +379,21 @@ int SoapyLiteXM2SDR::acquireReadBuffer(
     } else {
         /* Get the buffer. */
         int buf_offset = _rx_stream.user_count % _dma_mmap_info.dma_rx_buf_count;
+
+        /* Extract timestamp from the DMA header */
+#if defined(_RX_DMA_HEADER_TEST)
+        {
+            /* Header is at the beginning of the DMA buffer */
+            const uint8_t *header_ptr = reinterpret_cast<const uint8_t *>(_rx_stream.buf) + buf_offset * _dma_mmap_info.dma_rx_buf_size;
+            /* Timestamp is stored in bytes 8 to 16 of the header */
+            uint64_t timestamp = *reinterpret_cast<const uint64_t *>(header_ptr + 8);
+            /* Assign the extracted timestamp to the provided timeNs reference. */
+            timeNs = static_cast<long long>(timestamp);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "Extracted DMA timestamp: %llu ns", timestamp);
+        }
+#endif
+
+        /* Get the pointer to the actual sample data (skipping the header). */
         getDirectAccessBufferAddrs(stream, buf_offset, (void **)buffs);
 
         /* Update the DMA counters. */

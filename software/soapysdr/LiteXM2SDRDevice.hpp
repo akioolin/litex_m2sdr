@@ -1,7 +1,7 @@
 /*
  * SoapySDR driver for the LiteX M2SDR.
  *
- * Copyright (c) 2021-2024 Enjoy Digital.
+ * Copyright (c) 2021-2025 Enjoy Digital.
  * SPDX-License-Identifier: Apache-2.0
  * http://www.apache.org/licenses/LICENSE-2.0
  */
@@ -25,6 +25,9 @@
 #include <SoapySDR/Types.hpp>
 
 #define DEBUG
+
+//#define _122P88MSPS_TEST
+//#define _RX_DMA_HEADER_TEST
 
 #define DLL_EXPORT __attribute__ ((visibility ("default")))
 
@@ -302,6 +305,7 @@ class DLL_EXPORT SoapyLiteXM2SDR : public SoapySDR::Device {
     ***********************************************************************************************/
     bool hasHardwareTime(const std::string &) const override;
     long long getHardwareTime(const std::string &) const override;
+    void setHardwareTime(const long long timeNs, const std::string &);
 
     /***********************************************************************************************
     *                                    Sensor API

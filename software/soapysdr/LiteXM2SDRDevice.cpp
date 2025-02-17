@@ -1,7 +1,7 @@
 /*
  * SoapySDR driver for the LiteX M2SDR.
  *
- * Copyright (c) 2021-2024 Enjoy Digital.
+ * Copyright (c) 2021-2025 Enjoy Digital.
  * SPDX-License-Identifier: Apache-2.0
  * http://www.apache.org/licenses/LICENSE-2.0
  */
@@ -27,8 +27,6 @@
 #include <SoapySDR/Registry.hpp>
 #include <SoapySDR/Logger.hpp>
 #include <SoapySDR/Types.hpp>
-
-//#define _122P88MSPS_TEST
 
 /***************************************************************************************************
  *                                    AD9361
@@ -309,8 +307,25 @@ SoapyLiteXM2SDR::SoapyLiteXM2SDR(const SoapySDR::Kwargs &args)
     }
 
 #if USE_LITEPCIE
-    /* Bypass synchro. */
-    litex_m2sdr_writel(_fd, CSR_PCIE_DMA0_SYNCHRONIZER_BYPASS_ADDR, 1);
+    #if defined(_RX_DMA_HEADER_TEST)
+        /* Enable Synchronizer */
+        litex_m2sdr_writel(_fd, CSR_PCIE_DMA0_SYNCHRONIZER_BYPASS_ADDR, 0);
+
+        /* Enable DMA RX Header */
+        litex_m2sdr_writel(_fd, CSR_HEADER_RX_CONTROL_ADDR,
+           (1 << CSR_HEADER_TX_CONTROL_ENABLE_OFFSET) |
+           (1 << CSR_HEADER_RX_CONTROL_HEADER_ENABLE_OFFSET)
+        );
+    #else
+        /* Bypass Synchronizer */
+        litex_m2sdr_writel(_fd, CSR_PCIE_DMA0_SYNCHRONIZER_BYPASS_ADDR, 1);
+
+        /* Disable DMA RX Header */
+        litex_m2sdr_writel(_fd, CSR_HEADER_RX_CONTROL_ADDR,
+           (1 << CSR_HEADER_TX_CONTROL_ENABLE_OFFSET) |
+           (0 << CSR_HEADER_RX_CONTROL_HEADER_ENABLE_OFFSET)
+        );
+    #endif
 
     /* Disable DMA Loopback. */
     litex_m2sdr_writel(_fd, CSR_PCIE_DMA0_LOOPBACK_ENABLE_ADDR, 0);
@@ -903,25 +918,45 @@ bool SoapyLiteXM2SDR::hasHardwareTime(const std::string &) const {
     return true;
 }
 
-long long SoapyLiteXM2SDR::getHardwareTime(const std::string &) const {
-    int64_t uptime_cycles = 0;
-    int64_t uptime_ns     = 0;
+long long SoapyLiteXM2SDR::getHardwareTime(const std::string &) const
+{
+    uint32_t control_reg = 0;
+    int64_t time_ns = 0;
 
-    /* Latch the 64-bit uptime value. */
-    litex_m2sdr_writel(_fd, CSR_TIMER0_UPTIME_LATCH_ADDR, 1);
+    /* Latch the 64-bit Time (ns) by pulsing READ bit of Control Register. */
+    control_reg = litex_m2sdr_readl(_fd, CSR_TIME_GEN_CONTROL_ADDR);
+    control_reg |= (1 << CSR_TIME_GEN_CONTROL_READ_OFFSET);
+    litex_m2sdr_writel(_fd, CSR_TIME_GEN_CONTROL_ADDR, control_reg);
+    control_reg = (1 << CSR_TIME_GEN_CONTROL_ENABLE_OFFSET);
+    litex_m2sdr_writel(_fd, CSR_TIME_GEN_CONTROL_ADDR, control_reg);
 
-    /* Read the upper/lower 32 bits of the uptime value. */
-    uptime_cycles |= (static_cast<int64_t>(litex_m2sdr_readl(_fd, CSR_TIMER0_UPTIME_CYCLES_ADDR + 0)) << 32);
-    uptime_cycles |= (static_cast<int64_t>(litex_m2sdr_readl(_fd, CSR_TIMER0_UPTIME_CYCLES_ADDR + 4)) <<  0);
+    /* Read the upper/lower 32 bits of the 64-bit Time (ns). */
+    time_ns |= (static_cast<int64_t>(litex_m2sdr_readl(_fd, CSR_TIME_GEN_READ_TIME_ADDR + 0)) << 32);
+    time_ns |= (static_cast<int64_t>(litex_m2sdr_readl(_fd, CSR_TIME_GEN_READ_TIME_ADDR + 4)) <<  0);
 
-    /* Convert cycles to nanoseconds. */
-    const int64_t clock_frequency_hz = CONFIG_CLOCK_FREQUENCY;
-    uptime_ns = (uptime_cycles * 1000000000LL) / clock_frequency_hz;
+    /* Debug log the hardware time in nanoseconds. */
+    SoapySDR::logf(SOAPY_SDR_DEBUG, "Hardware time (ns): %lld", (long long)time_ns);
 
-    /* Debug log uptime in cycles and nanoseconds. */
-    SoapySDR::logf(SOAPY_SDR_DEBUG, "Hardware uptime (cycles): %lld, (ns): %lld", uptime_cycles, uptime_ns);
+    return static_cast<long long>(time_ns);
+}
 
-    return uptime_ns;
+void SoapyLiteXM2SDR::setHardwareTime(const long long timeNs, const std::string &)
+{
+    uint32_t control_reg = 0;
+
+    /* Write the 64-bit Time (ns). */
+    litex_m2sdr_writel(_fd, CSR_TIME_GEN_WRITE_TIME_ADDR + 0, static_cast<uint32_t>((timeNs >> 32) & 0xffffffff));
+    litex_m2sdr_writel(_fd, CSR_TIME_GEN_WRITE_TIME_ADDR + 4, static_cast<uint32_t>((timeNs >>  0) & 0xffffffff));
+
+    /* Pulse the WRITE bit Control Register. */
+    control_reg = litex_m2sdr_readl(_fd, CSR_TIME_GEN_CONTROL_ADDR);
+    control_reg |= (1 << CSR_TIME_GEN_CONTROL_WRITE_OFFSET);
+    litex_m2sdr_writel(_fd, CSR_TIME_GEN_CONTROL_ADDR, control_reg);
+    control_reg = (1 << CSR_TIME_GEN_CONTROL_ENABLE_OFFSET);
+    litex_m2sdr_writel(_fd, CSR_TIME_GEN_CONTROL_ADDR, control_reg);
+
+    /* Optional debug log. */
+    SoapySDR::logf(SOAPY_SDR_DEBUG, "Hardware time set to (ns): %lld", (long long)timeNs);
 }
 
 /***************************************************************************************************
