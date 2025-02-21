@@ -7,53 +7,93 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 import time
+import argparse
+
 from litex import RemoteClient
 
-bus = RemoteClient()
-bus.open()
+# Constants ----------------------------------------------------------------------------------------
 
-def latch_all():
-    bus.regs.clk_measurement_clk0_latch.write(1)
-    bus.regs.clk_measurement_clk1_latch.write(1)
-    bus.regs.clk_measurement_clk2_latch.write(1)
-    bus.regs.clk_measurement_clk3_latch.write(1)
+CLOCKS = {
+    "clk0": "       Sys Clk",
+    "clk1": "      PCIe Clk",
+    "clk2": "AD9361 Ref Clk",
+    "clk3": "AD9361 Dat Clk",
+    "clk4": "  Time Ref Clk",
+}
 
-def read_all():
-    values = [
-        bus.regs.clk_measurement_clk0_value.read(),
-        bus.regs.clk_measurement_clk1_value.read(),
-        bus.regs.clk_measurement_clk2_value.read(),
-        bus.regs.clk_measurement_clk3_value.read()
-    ]
-    return values
+# Clk Driver ---------------------------------------------------------------------------------------
 
-num_measurements    = 10
-delay_between_tests = 1
+class ClkDriver:
+    """
+    Driver for a clock measurement.
 
-# Latch and read initial values for each clock
-latch_all()
-previous_values = read_all()
-start_time = time.time()
+    This driver latches the clock counter, reads its value, and computes the frequency (in MHz)
+    based on the elapsed time and the counter delta.
+    """
+    def __init__(self, bus, clk_key, description):
+        self.bus         = bus
+        self.clk_key     = clk_key
+        self.description = description
+        self.latch_reg   = getattr(self.bus.regs, f"clk_measurement_{clk_key}_latch")
+        self.value_reg   = getattr(self.bus.regs, f"clk_measurement_{clk_key}_value")
 
-for i in range(num_measurements):
-    time.sleep(delay_between_tests)
+        # Initialize by latching and reading the first value.
+        self.latch()
+        self.prev_value = self.read()
+        self.prev_time  = time.time()
 
-    # Latch and read current values for each clock
-    latch_all()
-    current_values = read_all()
-    current_time = time.time()
+    def latch(self):
+        """Latch the current counter value."""
+        self.latch_reg.write(1)
 
-    # Calculate the actual elapsed time
-    elapsed_time = current_time - start_time
-    start_time = current_time  # Update the start_time for the next iteration
+    def read(self):
+        """Read the current counter value."""
+        return self.value_reg.read()
 
-    for clk_index in range(5):
-        # Compute the difference between the current and previous values
-        delta_value = current_values[clk_index] - previous_values[clk_index]
-        frequency_mhz = delta_value / (elapsed_time * 1e6)
-        print(f"Measurement {i + 1}, Clock {clk_index}: Frequency: {frequency_mhz:.2f} MHz")
+    def update(self):
+        """
+        Latch and read a new counter value, then compute the frequency based on the difference.
 
-        # Update the previous value for the next iteration
-        previous_values[clk_index] = current_values[clk_index]
+        Returns:
+            float: Frequency in MHz.
+        """
+        self.latch()
+        current_value   = self.read()
+        current_time    = time.time()
+        elapsed         = current_time  - self.prev_time
+        delta           = current_value - self.prev_value
+        frequency       = delta / (elapsed * 1e6)  # Convert to MHz
+        self.prev_value = current_value
+        self.prev_time  = current_time
+        return frequency
 
-bus.close()
+# Test Frequency -----------------------------------------------------------------------------------
+
+def test_frequency(num_measurements=10, delay_between_tests=1.0):
+    bus = RemoteClient()
+    bus.open()
+
+    # Create a ClkDriver for each clock.
+    clk_drivers = {clk: ClkDriver(bus, clk, desc) for clk, desc in CLOCKS.items()}
+    max_name_len = max(len(desc) for desc in CLOCKS.values())
+
+    for meas in range(num_measurements):
+        time.sleep(delay_between_tests)
+        for clk, driver in clk_drivers.items():
+            freq = driver.update()
+            print(f"Measurement {meas+1}, {driver.description:>{max_name_len}}: Frequency: {freq:.2f} MHz")
+
+    bus.close()
+
+# Main ---------------------------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="Frequency Measurement Script")
+    parser.add_argument("--num",   default=10,  type=int,   help="Number of measurements")
+    parser.add_argument("--delay", default=1.0, type=float, help="Delay between measurements (seconds)")
+    args = parser.parse_args()
+
+    test_frequency(num_measurements=args.num, delay_between_tests=args.delay)
+
+if __name__ == "__main__":
+    main()

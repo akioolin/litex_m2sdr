@@ -19,10 +19,18 @@
 
 #include "LiteXM2SDRDevice.hpp"
 
+/* RX DMA Header */
 #if USE_LITEPCIE && defined(_RX_DMA_HEADER_TEST)
 static constexpr size_t RX_DMA_HEADER_SIZE = 16;
 #else
 static constexpr size_t RX_DMA_HEADER_SIZE = 0;
+#endif
+
+/* TX DMA Header */
+#if USE_LITEPCIE && defined(_TX_DMA_HEADER_TEST)
+static constexpr size_t TX_DMA_HEADER_SIZE = 16;
+#else
+static constexpr size_t TX_DMA_HEADER_SIZE = 0;
 #endif
 
 /* Setup and configure a stream for RX or TX. */
@@ -74,9 +82,9 @@ SoapySDR::Stream *SoapyLiteXM2SDR::setupStream(
         _rx_stream.opened = true;
         _rx_stream.format = format;
 
-        /* Set channels to 0 and 1 if none are provided. */
+        /* Default to channel 0 if none are provided. */
         if (channels.empty()) {
-            _rx_stream.channels = {0, 1};
+            _rx_stream.channels = {0};
         } else {
             _rx_stream.channels = channels;
         }
@@ -106,7 +114,7 @@ SoapySDR::Stream *SoapyLiteXM2SDR::setupStream(
 
         /* Get Buffer and Parameters from TX DMA Reader */
         _tx_stream.buf = _tx_stream.dma.buf_wr;
-        _tx_buf_size   = _tx_stream.dma.mmap_dma_info.dma_tx_buf_size;
+        _tx_buf_size   = _tx_stream.dma.mmap_dma_info.dma_tx_buf_size - TX_DMA_HEADER_SIZE;
         _tx_buf_count  = _tx_stream.dma.mmap_dma_info.dma_tx_buf_count;
 
         /* Ensure the DMA is disabled initially to avoid counters being in a bad state. */
@@ -173,32 +181,36 @@ void SoapyLiteXM2SDR::closeStream(SoapySDR::Stream *stream) {
     }
 }
 
-/* Activate the specified stream (enable DMA engine). */
+/* Activate the specified stream (configure the DMA engines). */
 int SoapyLiteXM2SDR::activateStream(
     SoapySDR::Stream *stream,
     const int /*flags*/,
     const long long /*timeNs*/,
     const size_t /*numElems*/) {
+
+    /* RX */
     if (stream == RX_STREAM) {
         for (size_t i = 0; i < _rx_stream.channels.size(); i++)
             channel_configure(SOAPY_SDR_RX, _rx_stream.channels[i]);
 #if USE_LITEPCIE
         /* Crossbar Demux: Select PCIe streaming */
         litex_m2sdr_writel(_fd, CSR_CROSSBAR_DEMUX_SEL_ADDR, 0);
-        /* Enable the DMA engine for RX. */
-        litepcie_dma_writer(_fd, 1, &_rx_stream.hw_count, &_rx_stream.sw_count);
+        /* Configure the DMA engine for RX, but don't enable it yet. */
+        litepcie_dma_writer(_fd, 0, &_rx_stream.hw_count, &_rx_stream.sw_count);
 #elif USE_LITEETH
         /* Crossbar Demux: Select Ethernet streaming */
         litex_m2sdr_writel(_fd, CSR_CROSSBAR_DEMUX_SEL_ADDR, 1);
         _rx_udp_receiver->start();
 #endif
         _rx_stream.user_count = 0;
+
+    /* TX */
     } else if (stream == TX_STREAM) {
 #if USE_LITEPCIE
         for (size_t i = 0; i < _tx_stream.channels.size(); i++)
             channel_configure(SOAPY_SDR_TX, _tx_stream.channels[i]);
-        /* Enable the DMA engine for TX. */
-        litepcie_dma_reader(_fd, 1, &_tx_stream.hw_count, &_tx_stream.sw_count);
+        /* Configure the DMA engine for TX, but don't enable it yet. */
+        litepcie_dma_reader(_fd, 0, &_tx_stream.hw_count, &_tx_stream.sw_count);
         _tx_stream.user_count = 0;
 #endif
     }
@@ -237,7 +249,7 @@ size_t SoapyLiteXM2SDR::getStreamMTU(SoapySDR::Stream *stream) const {
         /* Each sample is 2 * Complex{Int16}. */
         return _rx_buf_size / (_nChannels * _bytesPerComplex);
     } else if (stream == TX_STREAM) {
-        return _dma_mmap_info.dma_tx_buf_size / (_nChannels * _bytesPerComplex);
+        return _tx_buf_size / (_nChannels * _bytesPerComplex);
     } else {
         throw std::runtime_error("SoapySDR::getStreamMTU(): Invalid stream.");
     }
@@ -262,7 +274,7 @@ int SoapyLiteXM2SDR::getDirectAccessBufferAddrs(
     if (stream == RX_STREAM) {
         buffs[0] = (char *)_rx_stream.buf + handle * _dma_mmap_info.dma_rx_buf_size + RX_DMA_HEADER_SIZE;
     } else if (stream == TX_STREAM) {
-        buffs[0] = (char *)_tx_stream.buf + handle * _dma_mmap_info.dma_tx_buf_size;
+        buffs[0] = (char *)_tx_stream.buf + handle * _dma_mmap_info.dma_tx_buf_size + TX_DMA_HEADER_SIZE;
     } else {
         throw std::runtime_error("SoapySDR::getDirectAccessBufferAddrs(): Invalid stream.");
     }
@@ -291,6 +303,8 @@ int SoapyLiteXM2SDR::getDirectAccessBufferAddrs(
 
 #define DETECT_EVERY_OVERFLOW  true  /* Detect overflow every time it occurs. */
 #define DETECT_EVERY_UNDERFLOW true  /* Detect underflow every time it occurs. */
+
+static constexpr uint64_t DMA_HEADER_SYNC_WORD = 0x5aa55aa55aa55aa5ULL;
 
 /* Acquire a buffer for reading. */
 int SoapyLiteXM2SDR::acquireReadBuffer(
@@ -380,16 +394,31 @@ int SoapyLiteXM2SDR::acquireReadBuffer(
         /* Get the buffer. */
         int buf_offset = _rx_stream.user_count % _dma_mmap_info.dma_rx_buf_count;
 
-        /* Extract timestamp from the DMA header */
+        /* Extract Sync Word and Timestamp from the DMA header */
 #if defined(_RX_DMA_HEADER_TEST)
         {
             /* Header is at the beginning of the DMA buffer */
             const uint8_t *header_ptr = reinterpret_cast<const uint8_t *>(_rx_stream.buf) + buf_offset * _dma_mmap_info.dma_rx_buf_size;
+
+            /* Extract sync word from bytes 0 to 8 of the Header */
+            uint64_t header = *reinterpret_cast<const uint64_t*>(header_ptr);
+            if (header != DMA_HEADER_SYNC_WORD) {
+                SoapySDR_logf(SOAPY_SDR_WARNING, "RX DMA Header Sync Word is not matching! Expected 0x%llx, got 0x%llx", DMA_HEADER_SYNC_WORD, header);
+            }
+
             /* Timestamp is stored in bytes 8 to 16 of the header */
-            uint64_t timestamp = *reinterpret_cast<const uint64_t *>(header_ptr + 8);
+            uint64_t timestamp = *reinterpret_cast<const uint64_t*>(header_ptr + 8);
+
             /* Assign the extracted timestamp to the provided timeNs reference. */
             timeNs = static_cast<long long>(timestamp);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "Extracted DMA timestamp: %llu ns", timestamp);
+
+            /* Track the previous timestamp */
+            static uint64_t prevTimestamp = 0;
+            uint64_t diff = (prevTimestamp == 0) ? 0 : (timestamp - prevTimestamp);
+            prevTimestamp = timestamp;
+
+            /* Debug RX DMA Timestamp and Diff vs previous */
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "RX DMA Timestamp: %llu ns (diff: %llu ns)", timestamp, diff);
         }
 #endif
 
@@ -466,6 +495,32 @@ int SoapyLiteXM2SDR::acquireWriteBuffer(
     /* Update the DMA counters. */
     handle = _tx_stream.user_count;
     _tx_stream.user_count++;
+
+    /* Write Sync Word and Timestamp to DMA header */
+#if defined(_TX_DMA_HEADER_TEST)
+    {
+        /* Header is at the beginning of the DMA buffer */
+        uint8_t *tx_buffer = reinterpret_cast<uint8_t*>(_tx_stream.buf) + (buf_offset * _dma_mmap_info.dma_tx_buf_size);
+
+        /* Extract Sync Word to bytes 0 to 8 of the Header */
+        uint64_t header = DMA_HEADER_SYNC_WORD;
+        *reinterpret_cast<uint64_t*>(tx_buffer) = header;
+
+        /* Compute the number of samples per DMA buffer. */
+        uint32_t samples_per_buffer = _dma_mmap_info.dma_tx_buf_size / (_nChannels * _bytesPerComplex);
+
+        /* Compute time increment (in nanoseconds) for this buffer */
+        uint64_t time_increment = static_cast<uint64_t>((samples_per_buffer / _tx_stream.samplerate) * 1e9);
+
+        /* Write Timestamp */
+        static uint64_t fakeTimestamp = 0;
+        fakeTimestamp += time_increment;
+        *reinterpret_cast<uint64_t*>(tx_buffer + 8) = fakeTimestamp;
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "TX DMA Header inserted: timestamp increment: %llu, new timestamp: %llu",
+                      time_increment, fakeTimestamp);
+    }
+#endif
+
 
     /* Detect underflows. */
     if (buffers_pending < 0) {

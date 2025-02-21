@@ -306,24 +306,39 @@ SoapyLiteXM2SDR::SoapyLiteXM2SDR(const SoapySDR::Kwargs &args)
         litex_m2sdr_writel(_fd, CSR_AD9361_BITMODE_ADDR, 0); /* 16-bit mode */
     }
 
-#if USE_LITEPCIE
-    #if defined(_RX_DMA_HEADER_TEST)
-        /* Enable Synchronizer */
-        litex_m2sdr_writel(_fd, CSR_PCIE_DMA0_SYNCHRONIZER_BYPASS_ADDR, 0);
 
-        /* Enable DMA RX Header */
+    /* Configure PCIe Synchronizer and DMA Headers. */
+#if USE_LITEPCIE
+    /* Enable Synchronizer */
+    litex_m2sdr_writel(_fd, CSR_PCIE_DMA0_SYNCHRONIZER_BYPASS_ADDR, 0);
+
+    /* DMA RX Header */
+    #if defined(_RX_DMA_HEADER_TEST)
+        /* Enable */
         litex_m2sdr_writel(_fd, CSR_HEADER_RX_CONTROL_ADDR,
-           (1 << CSR_HEADER_TX_CONTROL_ENABLE_OFFSET) |
+           (1 << CSR_HEADER_RX_CONTROL_ENABLE_OFFSET) |
            (1 << CSR_HEADER_RX_CONTROL_HEADER_ENABLE_OFFSET)
         );
     #else
-        /* Bypass Synchronizer */
-        litex_m2sdr_writel(_fd, CSR_PCIE_DMA0_SYNCHRONIZER_BYPASS_ADDR, 1);
-
-        /* Disable DMA RX Header */
+        /* Disable */
         litex_m2sdr_writel(_fd, CSR_HEADER_RX_CONTROL_ADDR,
-           (1 << CSR_HEADER_TX_CONTROL_ENABLE_OFFSET) |
+           (1 << CSR_HEADER_RX_CONTROL_ENABLE_OFFSET) |
            (0 << CSR_HEADER_RX_CONTROL_HEADER_ENABLE_OFFSET)
+        );
+    #endif
+
+    /* DMA TX Header */
+    #if defined(_TX_DMA_HEADER_TEST)
+        /* Enable */
+        litex_m2sdr_writel(_fd, CSR_HEADER_TX_CONTROL_ADDR,
+           (1 << CSR_HEADER_TX_CONTROL_ENABLE_OFFSET) |
+           (1 << CSR_HEADER_TX_CONTROL_HEADER_ENABLE_OFFSET)
+        );
+    #else
+        /* Disable */
+        litex_m2sdr_writel(_fd, CSR_HEADER_TX_CONTROL_ADDR,
+           (1 << CSR_HEADER_TX_CONTROL_ENABLE_OFFSET) |
+           (0 << CSR_HEADER_TX_CONTROL_HEADER_ENABLE_OFFSET)
         );
     #endif
 
@@ -344,11 +359,6 @@ SoapyLiteXM2SDR::SoapyLiteXM2SDR(const SoapySDR::Kwargs &args)
     if (args.count("oversampling") > 0) {
         _oversampling = std::stoi(args.at("oversampling"));
     }
-
-#ifdef _122P88MSPS_TEST
-    _bitMode      = 8;
-    _oversampling = 1;
-#endif
 
     if (do_init) {
 #if USE_LITEPCIE
@@ -786,21 +796,40 @@ void SoapyLiteXM2SDR::setSampleRate(
         rate / 1e6);
     uint32_t sample_rate = static_cast<uint32_t>(rate);
     _rateMult = 1.0;
+
+     /* If the requested rate is 122.88 MSPS, configure for 8-bit mode with oversampling enabled;
+        otherwise, use 16-bit mode and disable oversampling. */
+    if (rate == 122.88e6) {
+        _bitMode = 8; /* FIXME: We could keep 16-bit when PCIe > Gen2 X1. */
+        _oversampling = 1;
+    } else {
+        _bitMode = 16;
+        _oversampling = 0;
+    }
+    /* If oversampling is enabled and the rate exceeds 61.44 MSPS, double the rate multiplier to
+       account for oversampling. */
     if (_oversampling & (rate > 61.44e6))
         _rateMult = 2.0;
+
+    /* Set the sample rate for the TX and configure the hardware accordingly. */
     if (direction == SOAPY_SDR_TX) {
         _tx_stream.samplerate = rate;
         ad9361_set_tx_sampling_freq(ad9361_phy, sample_rate/_rateMult);
     }
+
+    /* Set the sample rate for the TX and configure the hardware accordingly. */
     if (direction == SOAPY_SDR_RX) {
         _rx_stream.samplerate = rate;
         ad9361_set_rx_sampling_freq(ad9361_phy, sample_rate/_rateMult);
     }
 
+    /* If oversampling is enabled and the rate multiplier indicates oversampling, enable
+       oversampling on the hardware. */
     if (_oversampling & (_rateMult == 2.0)) {
         ad9361_enable_oversampling(ad9361_phy);
     }
 
+     /* Finally, update the sample mode (bit depth) based on the new configuration. */
     setSampleMode();
 }
 

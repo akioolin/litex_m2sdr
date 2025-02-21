@@ -13,6 +13,7 @@ import argparse
 from migen import *
 
 from litex.gen import *
+from litex.gen.genlib.cdc import BusSynchronizer
 
 from litex.build.generic_platform import Subsignal, Pins
 from litex_m2sdr_platform import Platform
@@ -50,7 +51,6 @@ from gateware.ad9361.core import AD9361RFIC
 from gateware.qpll        import SharedQPLL
 from gateware.time        import TimeGenerator
 from gateware.pps         import PPSGenerator
-from gateware.timestamp   import Timestamp
 from gateware.header      import TXRXHeader
 from gateware.measurement import MultiClkMeasurement
 
@@ -127,7 +127,6 @@ class BaseSoC(SoCMini):
         # SDR.
         "si5351"          : 20,
         "time"            : 21,
-        "timestamp"       : 22,
         "header"          : 23,
         "ad9361"          : 24,
         "crossbar"        : 25,
@@ -189,9 +188,21 @@ class BaseSoC(SoCMini):
             with_csr   = True,
         )
 
+        # FIXME: Try to avoid CDC, change sys_clk?
+        time_sys = Signal(64)
+        self.time_sync = BusSynchronizer(
+            width   = 64,
+            idomain = "time",
+            odomain = "sys",
+        )
+        self.comb += [
+            self.time_sync.i.eq(self.time_gen.time),
+            time_sys.eq(self.time_sync.o),
+        ]
+
         # PPS Generator ----------------------------------------------------------------------------
 
-        self.pps_gen = ClockDomainsRenamer("time_gen_time")(PPSGenerator(
+        self.pps_gen = ClockDomainsRenamer("time")(PPSGenerator(
             clk_freq = 100e6,
             time     = self.time_gen.time,
             reset    = self.time_gen.time_change,
@@ -233,6 +244,7 @@ class BaseSoC(SoCMini):
         self.dna.add_timing_constraints(platform, sys_clk_freq, self.crg.cd_sys.clk)
 
         # SPI Flash --------------------------------------------------------------------------------
+
         self.flash_cs_n = GPIOOut(platform.request("flash_cs_n"))
         self.flash      = S7SPIFlash(platform.request("flash"), sys_clk_freq, 25e6)
         self.add_config("FLASH_IMAGE_SIZE", platform.image_size)
@@ -339,10 +351,6 @@ class BaseSoC(SoCMini):
             # Core
             self.add_sata(phy=self.sata_phy, mode="read+write")
 
-        # Timestamp --------------------------------------------------------------------------------
-
-        self.timestamp = Timestamp(clk_domain="rfic")
-
         # AD9361 RFIC ------------------------------------------------------------------------------
 
         self.ad9361 = AD9361RFIC(
@@ -363,7 +371,7 @@ class BaseSoC(SoCMini):
         self.header = TXRXHeader(data_width=64)
         self.comb += [
             self.header.rx.header.eq(0x5aa5_5aa5_5aa5_5aa5), # Unused for now, arbitrary.
-            self.header.rx.timestamp.eq(self.timestamp.time),
+            self.header.rx.timestamp.eq(time_sys),
         ]
 
         # TX/RX Datapath ---------------------------------------------------------------------------
@@ -382,28 +390,32 @@ class BaseSoC(SoCMini):
         # TX: Comms -> Crossbar -> Header.
         # --------------------------------
         if with_pcie:
-            self.comb += self.pcie_dma0.source.connect(self.crossbar.mux.sink0)
+            self.comb += [
+                self.pcie_dma0.source.connect(self.crossbar.mux.sink0),
+                If(self.crossbar.mux.sel == 0,
+                    self.header.tx.reset.eq(~self.pcie_dma0.synchronizer.synced)
+                )
+            ]
         if with_eth:
             self.comb += self.eth_tx_streamer.source.connect(self.crossbar.mux.sink1, omit={"error"})
         if with_sata:
             pass # TODO.
         self.comb += self.crossbar.mux.source.connect(self.header.tx.sink)
-        self.comb += If(self.crossbar.mux.sel == 0,
-            self.header.tx.reset.eq(~self.pcie_dma0.synchronizer.synced)
-        )
 
         # RX: Header -> Crossbar -> Comms.
         # --------------------------------
         self.comb += self.header.rx.source.connect(self.crossbar.demux.sink)
         if with_pcie:
-            self.comb += self.crossbar.demux.source0.connect(self.pcie_dma0.sink)
+            self.comb += [
+                self.crossbar.demux.source0.connect(self.pcie_dma0.sink),
+                If(self.crossbar.demux.sel == 0,
+                    self.header.rx.reset.eq(~self.pcie_dma0.synchronizer.synced)
+                )
+            ]
         if with_eth:
             self.comb += self.crossbar.demux.source1.connect(self.eth_rx_streamer.sink)
         if with_sata:
             pass # TODO.
-        self.comb += If(self.crossbar.demux.sel == 0,
-            self.header.rx.reset.eq(~self.pcie_dma0.synchronizer.synced)
-        )
 
         # Timing Constraints/False Paths -----------------------------------------------------------
 
