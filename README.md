@@ -130,7 +130,9 @@ If you are an SDR enthusiast looking to get started with the LiteX-M2SDR board, 
    - Load the kernel driver with the following commands:
    ```
    cd software/kernel
-   sudo ./init.sh
+   make clean all
+   sudo make install
+   sudo insmod m2sdr.ko (To avoid having to reboot the machine)
    ```
    - 🚀 Ready for launch!
 
@@ -154,6 +156,11 @@ If you are an SDR enthusiast looking to get started with the LiteX-M2SDR board, 
 > sudo reboot
 > ```
 
+> [!WARNING]
+> For intel CPU: if a *kernel panic* occurs with the message **Corrupted page table at address**,
+> add `intel_iommu=off` to `GRUB_CMDLINE_LINUX`. (This has been observed on
+> an *11th Gen Intel(R) Core(TM) i7-11700B @ 3.20GHz*)
+
 ### Tutorials for your platform
 
 > [!WARNING]
@@ -163,6 +170,7 @@ If you are an SDR enthusiast looking to get started with the LiteX-M2SDR board, 
 For some platforms we created detailed tutorials. For everything else, please follow the earlier *Getting Started* tutorial.
 
 - [Use LiteX-M2SDR on OrangePI 5 Max](doc/hosts/orangepi-5-max.md)
+- [Use LiteX-M2SDR on Raspberry Pi 5](doc/hosts/raspberry-pi-5.md)
 
 ### For Software Developers
 
@@ -173,7 +181,8 @@ For those who want to dive deeper into development with the LiteX-M2SDR board, f
    ```
    cd software/kernel
    make clean all
-   sudo ./init.sh
+   sudo make install
+   sudo insmod m2sdr.ko (To avoid having to reboot the machine)
    ```
    - Test the user-space utilities:
    ```
