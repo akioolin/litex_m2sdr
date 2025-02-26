@@ -85,7 +85,7 @@ static void m2sdr_play(const char *device_name, const char *filename, uint32_t l
             if (feof(fo)) {
                 /* Rewind on end of file. */
                 current_loop += 1;
-                if (current_loop >= loops)
+                if (loops != 0 && current_loop >= loops)
                     keep_running = 0;
                 rewind(fo);
                 len += fread(buf_wr + len, 1, DMA_BUFFER_SIZE - len, fo);
@@ -131,16 +131,17 @@ static void m2sdr_play(const char *device_name, const char *filename, uint32_t l
 
 static void help(void)
 {
-    printf("LitePCIe testing utilities\n"
-           "usage: litepcie_test [options] cmd [args...]\n"
+    printf("M2SDR I/Q Player Utility\n"
+           "usage: m2sdr_play [options] filename [loops]\n"
            "\n"
-           "options:\n"
-           "-h                               Help.\n"
-           "-c device_num                    Select the device (default = 0).\n"
-           "-z                               Enable zero-copy DMA mode.\n"
+           "Options:\n"
+           "-h                    Display this help message.\n"
+           "-c device_num         Select the device (default = 0).\n"
+           "-z                    Enable zero-copy DMA mode.\n"
            "\n"
-           "filename [loops]                 Play I/Q samples stream from file.\n"
-           );
+           "Arguments:\n"
+           "filename              I/Q samples stream file to play.\n"
+           "loops                 Number of times to loop playback (default=1, 0 for infinite).\n");
     exit(1);
 }
 

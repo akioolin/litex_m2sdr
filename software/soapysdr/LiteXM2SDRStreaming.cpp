@@ -203,6 +203,7 @@ int SoapyLiteXM2SDR::activateStream(
         _rx_udp_receiver->start();
 #endif
         _rx_stream.user_count = 0;
+        _rx_stream.burst_end = false;
 
     /* TX */
     } else if (stream == TX_STREAM) {
@@ -230,6 +231,10 @@ int SoapyLiteXM2SDR::deactivateStream(
 #elif USE_LITEETH
         _rx_udp_receiver->stop();
 #endif
+        /* set burst_end: if readStream is called after this point SOAPY_SDR_END_BURST
+         * will be set
+         */
+        _rx_stream.burst_end = true;
     } else if (stream == TX_STREAM) {
 #if USE_LITEPCIE
         /* Disable the DMA engine for TX. */
@@ -321,6 +326,9 @@ int SoapyLiteXM2SDR::acquireReadBuffer(
     if (stream != RX_STREAM) {
         return SOAPY_SDR_STREAM_ERROR;
     }
+
+    if (_rx_stream.burst_end)
+        flags |= SOAPY_SDR_END_BURST;
 
 #if USE_LITEETH
 #ifdef USE_THREAD
@@ -890,4 +898,39 @@ int SoapyLiteXM2SDR::writeStream(
     }
 
     return returnedElems;
+}
+
+/* Check the status of the TX/RX streams. */
+int SoapyLiteXM2SDR::readStreamStatus(
+    SoapySDR::Stream *stream,
+    size_t &chanMask,
+    int &flags,
+    long long &timeNs,
+    const long timeoutUs){
+
+    /* For now we only suport TX stream. */
+    if(stream != TX_STREAM){
+        return SOAPY_SDR_NOT_SUPPORTED;
+    }
+
+    /* Calculate the timeout duration and exit time. */
+    const auto timeout = std::chrono::duration_cast<std::chrono::high_resolution_clock::duration>(std::chrono::microseconds(timeoutUs));
+    const auto exitTime = std::chrono::high_resolution_clock::now() + timeout;
+
+    /* Poll for status events until the timeout expires. */
+    while (true) {
+        if(_tx_stream.underflow){
+            _tx_stream.underflow=false;
+            SoapySDR::log(SOAPY_SDR_SSI, "U");
+            return SOAPY_SDR_UNDERFLOW;
+        }
+
+        /* Sleep for a fraction of the total timeout. */
+        const auto sleepTimeUs = std::min<long>(1000, timeoutUs/10);
+        std::this_thread::sleep_for(std::chrono::microseconds(sleepTimeUs));
+
+        /* Check if the timeout has expired. */
+        const auto timeNow = std::chrono::high_resolution_clock::now();
+        if (exitTime < timeNow) return SOAPY_SDR_TIMEOUT;
+    }
 }
