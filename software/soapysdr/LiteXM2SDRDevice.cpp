@@ -789,6 +789,12 @@ void SoapyLiteXM2SDR::setSampleRate(
     const double rate) {
     std::lock_guard<std::mutex> lock(_mutex);
     std::string dirName ((direction == SOAPY_SDR_RX) ? "Rx" : "Tx");
+
+    /* Check if the requested sample rate is below 0.55 Msps and throw an exception if so */
+    if (rate < 550000.0) {
+        throw std::runtime_error("Sample rates below 0.55 Msps are not supported (limitation to be removed soon)");
+    }
+
     SoapySDR::logf(SOAPY_SDR_DEBUG,
         "setSampleRate(%s, %ld, %g MHz)",
         dirName,
@@ -810,6 +816,24 @@ void SoapyLiteXM2SDR::setSampleRate(
        account for oversampling. */
     if (_oversampling & (rate > 61.44e6))
         _rateMult = 2.0;
+
+    /* Check and set FIR decimation/interpolation if actual rate is below 2.5 Msps */
+    double actual_rate = rate / _rateMult;
+    if (actual_rate < 2500000.0) {
+        SoapySDR::logf(SOAPY_SDR_INFO, "Setting FIR decimation/interpolation to 4 for rate %f < 2.5 Msps", actual_rate);
+        ad9361_phy->rx_fir_dec    = 4;
+        ad9361_phy->tx_fir_int    = 4;
+        ad9361_phy->bypass_rx_fir = 0;
+        ad9361_phy->bypass_tx_fir = 0;
+        AD9361_RXFIRConfig rx_fir_cfg = rx_fir_config;
+        AD9361_TXFIRConfig tx_fir_cfg = tx_fir_config;
+        rx_fir_cfg.rx_dec = 4;
+        tx_fir_cfg.tx_int = 4;
+        ad9361_set_rx_fir_config(ad9361_phy, rx_fir_cfg);
+        ad9361_set_tx_fir_config(ad9361_phy, tx_fir_cfg);
+        ad9361_set_rx_fir_en_dis(ad9361_phy, 1);
+        ad9361_set_tx_fir_en_dis(ad9361_phy, 1);
+    }
 
     /* Set the sample rate for the TX and configure the hardware accordingly. */
     if (direction == SOAPY_SDR_TX) {
@@ -851,16 +875,27 @@ std::vector<double> SoapyLiteXM2SDR::listSampleRates(
     const int /*direction*/,
     const size_t /*channel*/) const {
     std::vector<double> sampleRates;
+
+    /* Standard SampleRates */
     sampleRates.push_back(25e6 / 96); /* 260.42 KSPS (Minimum sample rate). */
-    sampleRates.push_back(1.0e6);     /* 1 MSPS. */
-    sampleRates.push_back(2.5e6);     /* 2.5 MSPS. */
-    sampleRates.push_back(5.0e6);     /* 5 MSPS. */
-    sampleRates.push_back(10.0e6);    /* 10 MSPS. */
-    sampleRates.push_back(20.0e6);    /* 20 MSPS. */
-    sampleRates.push_back(30.72e6);   /* 30.72 MSPS. */
-    sampleRates.push_back(61.44e6);   /* 61.44 MSPS (Maximum sample rate without oversampling). */
+    sampleRates.push_back(1.0e6);     /*      1 MSPS. */
+    sampleRates.push_back(2.5e6);     /*    2.5 MSPS. */
+    sampleRates.push_back(5.0e6);     /*      5 MSPS. */
+    sampleRates.push_back(10.0e6);    /*     10 MSPS. */
+    sampleRates.push_back(20.0e6);    /*     20 MSPS. */
+
+    /* LTE / 5G NR SampleRates */
+    sampleRates.push_back(1.92e6);    /*  1.92 MSPS (LTE 1.4 MHz BW). */
+    sampleRates.push_back(3.84e6);    /*  3.84 MSPS (LTE 3 MHz BW).   */
+    sampleRates.push_back(7.68e6);    /*  7.68 MSPS (LTE 5 MHz BW).   */
+    sampleRates.push_back(15.36e6);   /* 15.36 MSPS (LTE 10 MHz BW).  */
+    sampleRates.push_back(23.04e6);   /* 23.04 MSPS (LTE 15 MHz BW).  */
+    sampleRates.push_back(30.72e6);   /* 30.72 MSPS (LTE 20 MHz BW).  */
+    sampleRates.push_back(61.44e6);   /* 61.44 MSPS (LTE 40 MHz BW via 2x 20 MHz CA, 5G NR 50 MHz BW). */
     if (_oversampling)
-        sampleRates.push_back(122.88e6);  /* 122.88 MSPS (Maximum sample rate with oversampling). */
+        sampleRates.push_back(122.88e6);  /* 122.88 MSPS (LTE 80 MHz BW via 4x 20 MHz CA, 5G NR 100 MHz BW). */
+
+    /* Return supported SampleRates */
     return sampleRates;
 }
 
