@@ -42,9 +42,8 @@ static int spi_fd;
 static struct eb_connection *eb_fd;
 #endif
 
-void m2sdr_ad9361_spi_xfer(struct eb_connection *eb, uint8_t len, uint8_t *mosi, uint8_t *miso);
-void eb_m2sdr_ad9361_spi_write(struct eb_connection *eb, uint16_t reg, uint8_t dat);
-uint8_t eb_m2sdr_ad9361_spi_read(struct eb_connection *eb, uint16_t reg);
+//#define AD9361_SPI_WRITE_DEBUG
+//#define AD9361_SPI_READ_DEBUG
 
 int spi_write_then_read(struct spi_device * /*spi*/,
                         const unsigned char *txbuf, unsigned n_tx,
@@ -56,7 +55,7 @@ int spi_write_then_read(struct spi_device * /*spi*/,
 #if USE_LITEPCIE
         rxbuf[0] = m2sdr_ad9361_spi_read(spi_fd, txbuf[0] << 8 | txbuf[1]);
 #elif USE_LITEETH
-        rxbuf[0] = eb_m2sdr_ad9361_spi_read(eb_fd, txbuf[0] << 8 | txbuf[1]);
+        rxbuf[0] = m2sdr_ad9361_eb_spi_read(eb_fd, txbuf[0] << 8 | txbuf[1]);
 #endif
 
     /* Single Byte Write. */
@@ -64,7 +63,7 @@ int spi_write_then_read(struct spi_device * /*spi*/,
 #if USE_LITEPCIE
         m2sdr_ad9361_spi_write(spi_fd, txbuf[0] << 8 | txbuf[1], txbuf[2]);
 #else
-        eb_m2sdr_ad9361_spi_write(eb_fd, txbuf[0] << 8 | txbuf[1], txbuf[2]);
+        m2sdr_ad9361_eb_spi_write(eb_fd, txbuf[0] << 8 | txbuf[1], txbuf[2]);
 #endif
 
     /* Unsupported. */
@@ -75,74 +74,6 @@ int spi_write_then_read(struct spi_device * /*spi*/,
     }
 
     return 0;
-}
-
-#define eb_writel(_eb, _addr, _val) eb_write32(_eb, _val, _addr)
-void eb_m2sdr_ad9361_spi_xfer(struct eb_connection *eb, uint8_t len, uint8_t *mosi, uint8_t *miso) {
-    bool is_write;
-    eb_writel(eb, CSR_AD9361_SPI_MOSI_ADDR, mosi[0] << 16 | mosi[1] << 8 | mosi[2]);
-    eb_writel(eb, CSR_AD9361_SPI_CONTROL_ADDR, 24*SPI_CONTROL_LENGTH | SPI_CONTROL_START);
-    /* Omit polling the SPI_STATUS_DONE flag to reduce Etherbone round-trip latency */
-    /* while ((eb_read32(eb, CSR_AD9361_SPI_STATUS_ADDR) & 0x1) != SPI_STATUS_DONE); */
-    is_write = (mosi[0] & 0x80) != 0;
-    if (!is_write) {
-        miso[2] = eb_read32(eb, CSR_AD9361_SPI_MISO_ADDR) & 0xff;
-    }
-}
-
-void eb_m2sdr_ad9361_spi_write(struct eb_connection *eb, uint16_t reg, uint8_t dat) {
-    uint8_t mosi[3];
-    uint8_t miso[3];
-
-#ifdef AD9361_SPI_WRITE_DEBUG
-    printf("ad9361_spi_write_reg; reg:0x%04x dat:%02x\n", reg, dat);
-#endif
-
-    /* Prepare Data. */
-    mosi[0]  = (1 << 7);
-    mosi[0] |= (reg >> 8) & 0x7f;
-    mosi[1]  = (reg >> 0) & 0xff;
-    mosi[2]  = dat;
-
-    /* Do SPI Xfer. */
-    eb_m2sdr_ad9361_spi_xfer(eb, 3, mosi, miso);
-}
-
-uint8_t eb_m2sdr_ad9361_spi_read(struct eb_connection *eb, uint16_t reg) {
-    uint8_t dat;
-    uint8_t mosi[3];
-    uint8_t miso[3];
-
-    /* Prepare Data. */
-    mosi[0]  = (0 << 7);
-    mosi[0] |= (reg >> 8) & 0x7f;
-    mosi[1]  = (reg >> 0) & 0xff;
-    mosi[2]  = 0x00;
-
-    /* Do SPI Xfer. */
-    eb_m2sdr_ad9361_spi_xfer(eb, 3, mosi, miso);
-
-    /* Process Data. */
-    dat = miso[2];
-
-#ifdef AD9361_SPI_WRITE_DEBUG
-    printf("ad9361_spi_read_reg; reg:0x%04x dat:%02x\n", reg, dat);
-#endif
-
-    return dat;
-}
-
-void eb_m2sdr_ad9361_spi_init(struct eb_connection *fd, uint8_t reset) {
-    if (reset) {
-        /* Reset Through GPIO */
-        eb_write32(fd, 0b00, CSR_AD9361_CONFIG_ADDR);
-        usleep(1000);
-    }
-    eb_write32(fd, 0b11, CSR_AD9361_CONFIG_ADDR);
-    usleep(1000);
-
-    /* Small delay. */
-    usleep(1000);
 }
 
 /* AD9361 Delays */
@@ -368,7 +299,7 @@ SoapyLiteXM2SDR::SoapyLiteXM2SDR(const SoapySDR::Kwargs &args)
         /* Initialize AD9361 SPI. */
         m2sdr_ad9361_spi_init(_fd, 1);
 #else
-        eb_m2sdr_ad9361_spi_init(_fd, 1);
+        m2sdr_ad9361_eb_spi_init(_fd, 1);
 #endif
     }
 
@@ -458,6 +389,15 @@ SoapyLiteXM2SDR::~SoapyLiteXM2SDR(void) {
 
 #if USE_LITEPCIE
     close(_fd);
+#elif USE_LITEETH
+    if (_rx_udp_receiver) {
+        delete _rx_udp_receiver;
+        _rx_udp_receiver = NULL;
+    }
+    if (_fd) {
+        eb_disconnect(&_fd);
+        _fd = NULL;
+    }
 #endif
 }
 
