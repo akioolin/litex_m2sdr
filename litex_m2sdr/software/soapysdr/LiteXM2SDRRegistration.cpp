@@ -35,12 +35,24 @@ std::string readFPGAData(
     return data;
 }
 
-std::string getLiteXM2SDRIdentification(litex_m2sdr_device_desc_t fd) {
-    return readFPGAData(fd, CSR_IDENTIFIER_MEM_BASE, LITEX_IDENTIFIER_SIZE);
+
+std::string getLiteXM2SDRIdentification(litex_m2sdr_device_desc_t fd)
+{
+    /* Read up to LITEX_IDENTIFIER_SIZE bytes from the FPGA */
+    std::string data = readFPGAData(fd, CSR_IDENTIFIER_MEM_BASE, LITEX_IDENTIFIER_SIZE);
+
+    /* Truncate at the first null terminator if present */
+    size_t nullPos = data.find('\0');
+    if (nullPos != std::string::npos)
+    {
+        data.resize(nullPos);
+    }
+
+    return data;
 }
 
 std::string getLiteXM2SDRSerial(litex_m2sdr_device_desc_t fd) {
-    unsigned int high = litex_m2sdr_readl(fd, CSR_DNA_ID_ADDR);
+    unsigned int high = litex_m2sdr_readl(fd, CSR_DNA_ID_ADDR + 0);
     unsigned int low  = litex_m2sdr_readl(fd, CSR_DNA_ID_ADDR + 4);
     char serial[32];
     snprintf(serial, sizeof(serial), "%x%08x", high, low);
@@ -51,7 +63,7 @@ std::string generateDeviceLabel(
     const SoapySDR::Kwargs &dev,
     const std::string &path) {
     std::string serialTrimmed = dev.at("serial").substr(dev.at("serial").find_first_not_of('0'));
-    return dev.at("device") + " " + path + " " + serialTrimmed + " " + dev.at("identification");
+    return dev.at("device") + " " + path + " " + serialTrimmed;
 }
 
 SoapySDR::Kwargs createDeviceKwargs(
