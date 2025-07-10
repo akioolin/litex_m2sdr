@@ -7,8 +7,22 @@
 
 ![License](https://img.shields.io/badge/License-BSD%202--Clause-orange.svg)
 
+[> TL;DR
+---------
+- **What?** LiteX‑based M.2 2280 SDR board featuring a Xilinx **Artix‑7 XC7A200T** FPGA and an **ADI AD9361** RFIC.
+- **Why?** Open‑source gateware/software, up to 61.44 MSPS (122.88 MSPS†) over PCIe Gen2 ×4, hack‑friendly clocking & debug.
+- **Who?** SDR tinkerers, FPGA devs, time‑sync enthusiats or anyone hitting the limits of other SDRs.
+- **How fast?** `apt install …` → `./build.py` → **stream/record IQ in ≈5 min** with our C API/tools or any SoapySDR compatible software.
+
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/a432b864-dad6-4c65-8447-dab67835806f" alt="LiteXM2SDR annotated" width="100%">
+</div>
+
+† Oversampling needs PCIe Gen2 ×2/×4 bandwidth.
+
 [> Intro
 --------
+<a id="intro"></a>
 
 We know what you'll first ask when discovering this new SDR project: what's the RFIC? 🤔 Let's answer straight away: Another **AD936X**-based SDR! 😄
 
@@ -45,8 +59,19 @@ For Ethernet support with 1000BaseX/2500BaseX and SATA connectivity to directly 
 
 Unlock new possibilities in your SDR projects with this cutting-edge board—we'll try our best to meet your needs! 🎉
 
+[> Contents
+-----------
+
+1. [Hardware Availability](#hardware-availability)
+2. [Capabilities Overview](#capabilities-overview)
+3. [PCIe SoC Design](#pcie-soc-design)
+4. [Ethernet SoC Design (WIP)](#ethernet-soc-design)
+5. [Quick Start](#quick-start)
+6. [Contact](#contact)
+
 [> Hardware Availability
 ------------------------
+<a id="hardware-availability"></a>
 The LiteX-M2SDR board is now fully commercialized and available for purchase from our webshop: [Enjoy-Digital Shop](https://enjoy-digital-shop.myshopify.com).
 
 The hardware has been thoroughly tested with several SDR softwares compatible with SoapySDR as well as with our Bare metal C utilities.
@@ -57,8 +82,40 @@ The hardware has been thoroughly tested with several SDR softwares compatible wi
 
 *Note: The differences between the variants are relevant only for specific use cases. The SI5351B variant is mostly intended for advanced users with specialized clock control requirements.*
 
+[> Capabilities Overview
+------------------------
+<a id="capabilities-overview"></a>
+
+| Feature                          | Mounted in M.2 Slot         | Mounted in Baseboard         | Parameter(s) to Enable                        |
+|----------------------------------|------------------------------|-----------------------------|-----------------------------------------------|
+| **SDR Functionality**           |                              |                              |                                               |
+| SDR TX (AD9361)                 | ✅                           | ✅                           | (always included)                             |
+| SDR RX (AD9361)                 | ✅                           | ✅                           | (always included)                             |
+| Oversampling (122.88MSPS)       | ✅  (PCIe Gen2 x2/x4 only)   | ❌                           | `--with-pcie --pcie-lanes=2|4`                |
+| C API + Utilities               | ✅                           | ✅                           | (included in software build)                  |
+| SoapySDR Support                | ✅                           | ✅                           | (via optional SoapySDR driver)                |
+|                                 |                              |                              |                                               |
+| **Connectivity**                |                              |                              |                                               |
+| PCIe (up to Gen2 x4)            | ✅                           | ✅ (x1 only)                 | `--with-pcie --pcie-lanes=1|2|4`              |
+| Ethernet (1G/2.5G)              | ❌                           | ✅                           | `--with-eth`                                  |
+| ├─ Ethernet RX (LiteEth)        | ❌                           | ✅                           | (included with `--with-eth`)                  |
+| └─ Ethernet TX (LiteEth)        | ❌                           | ⚠️ (in development)          | (included with `--with-eth`)                  |
+|                                 |                              |                              |                                               |
+| **Timing & Sync**               |                              |                              |                                               |
+| PTM (Precision Time Measurement)| ✅ (PCIe Gen2 x1 only)       | ✅ (PCIe Gen2 x1 only)       | `--with-pcie --pcie-lanes=1 --with-pcie-ptm`  |
+| White Rabbit Support            | ❌                           | ✅                           | `--with-white-rabbit`                         |
+| External Clocking               | ✅ (SI5351C: ext. 10MHz)     | ✅ (SI5351C: ext. 10MHz)     | (SI5351B VCXO mode in dev for PTM regulation) |
+|                                 |                              |                              |                                               |
+| **Storage**                     |                              |                              |                                               |
+| SATA                            | ❌                           | ⚠️ (in development)          | `--with-sata`                                 |
+|                                 |                              |                              |                                               |
+| **System Features**             |                              |                              |                                               |
+| Multiboot / Remote Update       | ✅                           | ✅                           | (always included)                             |
+| GPIO                            | ✅                           | ✅                           | (always included)                             |
+
 [> PCIe SoC Design
 ------------------
+<a id="pcie-soc-design"></a>
 
 The PCIe design is the first variant developed for the board and does not require an additional baseboard. Just pop the M2SDR into a PCIe M2 slot, connect your antennas, and you're ready to go! 🚀
 
@@ -77,6 +134,7 @@ The PCIe design has already been validated at the maximum AD9361 specified sampl
 
 [> Ethernet SoC Design (1/2.5Gbps x 1 or 2).
 --------------------------------------------
+<a id="ethernet-soc-design"></a>
 
 > [!WARNING]
 >
@@ -94,6 +152,7 @@ The Ethernet SoC design is RX capable only for now. TX support will come soon.
 
 [> Getting Started
 ------------------
+<a id="quick-start"></a>
 
 ### For SDR Enthusiasts
 
@@ -262,6 +321,8 @@ For those who want to explore the full potential of the LiteX-M2SDR board, inclu
 
 [> Contact
 ----------
+<a id="contact"></a>
+
 Got a unique idea or need a tweak? Whether it's custom FPGA/software development or hardware adjustments (like adapter boards) for your LiteX M2 SDR, we're here to help! Feel free to drop us a line or visit our website. We'd love to hear from you!
 
 E-mail: florent@enjoy-digital.fr

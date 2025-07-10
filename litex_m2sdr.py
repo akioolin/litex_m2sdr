@@ -35,6 +35,8 @@ from litex.build.generic_platform import IOStandard, Subsignal, Pins
 
 from litepcie.common        import *
 from litepcie.phy.s7pciephy import S7PCIEPHY
+from litepcie.frontend.ptm  import PCIePTMSniffer
+from litepcie.frontend.ptm  import PTMCapabilities, PTMRequester
 
 from liteeth.common           import convert_ip
 from liteeth.phy.a7_1000basex import A7_1000BASEX, A7_2500BASEX
@@ -62,43 +64,81 @@ from litex_m2sdr.software import generate_litepcie_software
 # CRG ----------------------------------------------------------------------------------------------
 
 class CRG(LiteXModule):
-    def __init__(self, platform, sys_clk_freq, with_eth=False, with_sata=False):
-        self.rst            = Signal()
-        self.cd_sys         = ClockDomain()
-        self.cd_clk10       = ClockDomain()
-        self.cd_idelay      = ClockDomain()
-        self.cd_refclk_pcie = ClockDomain()
-        self.cd_refclk_eth  = ClockDomain()
-        self.cd_refclk_sata = ClockDomain()
+    def __init__(self, platform, sys_clk_freq, with_eth=False, with_sata=False, with_white_rabbit=False):
+        self.rst              = Signal()
+        self.cd_sys           = ClockDomain()
+        self.cd_clk10         = ClockDomain()
+
+        self.cd_clk100        = ClockDomain()
+        self.cd_idelay        = ClockDomain()
+
+        self.cd_refclk_pcie   = ClockDomain()
+        self.cd_refclk_eth    = ClockDomain()
+        self.cd_refclk_sata   = ClockDomain()
+
+        self.cd_clk_125m_gtp  = ClockDomain()
+        self.cd_clk_62m5_dmtd = ClockDomain()
+        self.cd_clk10m_in     = ClockDomain()
+        self.cd_clk62m5_in    = ClockDomain()
 
         # # #
 
+        assert not (with_eth and with_white_rabbit) # FIXME.
+
         # Clk / Rst.
+        # ----------
         clk100 = platform.request("clk100")
 
         # PLL.
+        # ----
         self.pll = pll = S7PLL(speedgrade=-3)
         self.comb += self.pll.reset.eq(self.rst)
         pll.register_clkin(clk100, 100e6)
         pll.create_clkout(self.cd_sys,    sys_clk_freq)
-        pll.create_clkout(self.cd_clk10,  10e6)
+        if not with_white_rabbit:
+            pll.create_clkout(self.cd_clk10, 10e6)
         pll.create_clkout(self.cd_idelay, 200e6)
-        platform.add_platform_command("set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets basesoc_crg_clkout_buf1]") # FIXME: Simplify clk10.
+        platform.add_platform_command("set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets basesoc_crg_clkout_buf1]")       # FIXME: Simplify clk10.
+        platform.add_platform_command("set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets basesoc_crg_s7pll_clkout_buf1]") # FIXME: Simplify clk10.
+        self.comb += self.cd_clk100.clk.eq(pll.clkin)
 
         # IDelayCtrl.
+        # -----------
         self.idelayctrl = S7IDELAYCTRL(self.cd_idelay)
 
         # Ethernet PLL.
+        # -------------
         if with_eth or with_sata:
             self.eth_pll = eth_pll = S7PLL()
             eth_pll.register_clkin(self.cd_sys.clk, sys_clk_freq)
             eth_pll.create_clkout(self.cd_refclk_eth, 156.25e6, margin=0)
 
         # SATA PLL.
+        # ---------
         if with_sata or with_eth:
             self.sata_pll = sata_pll = S7PLL()
             sata_pll.register_clkin(self.cd_sys.clk, sys_clk_freq)
             sata_pll.create_clkout(self.cd_refclk_sata, 150e6, margin=0)
+
+        # White Rabbit MMCMs.
+        # -------------------
+        if with_white_rabbit:
+            # RefClk MMCM (125MHz).
+            self.refclk_mmcm = S7MMCM(speedgrade=-3)
+            self.comb += self.refclk_mmcm.reset.eq(self.rst)
+            self.refclk_mmcm.register_clkin(ClockSignal("clk100"), 100e6)
+            self.refclk_mmcm.create_clkout(self.cd_clk_125m_gtp,  125e6, margin=0)
+            self.refclk_mmcm.expose_dps("clk100", with_csr=False)
+            self.refclk_mmcm.params.update(p_CLKOUT0_USE_FINE_PS="TRUE")
+            self.comb += self.cd_refclk_eth.clk.eq(self.cd_clk_125m_gtp.clk)
+
+            # DMTD MMCM (62.5MHz).
+            self.dmtd_mmcm = S7MMCM(speedgrade=-3)
+            self.comb += self.dmtd_mmcm.reset.eq(self.rst)
+            self.dmtd_mmcm.register_clkin(ClockSignal("clk100"), 100e6)
+            self.dmtd_mmcm.create_clkout(self.cd_clk_62m5_dmtd, 62.5e6, margin=0)
+            self.dmtd_mmcm.expose_dps("clk100", with_csr=False)
+            self.dmtd_mmcm.params.update(p_CLKOUT0_USE_FINE_PS="TRUE")
 
 # BaseSoC ------------------------------------------------------------------------------------------
 
@@ -151,11 +191,12 @@ class BaseSoC(SoCMini):
     }
 
     def __init__(self, variant="m2", sys_clk_freq=int(125e6),
-        with_pcie     = True,  pcie_lanes=1,
-        with_eth      = False, eth_sfp=0, eth_phy="1000basex", eth_local_ip="192.168.1.50", eth_udp_port=2345,
-        with_sata     = False, sata_gen="gen2",
-        with_jtagbone = True,
-        with_rfic_oversampling = True,
+        with_pcie              = True,  with_pcie_ptm=False, pcie_lanes=1,
+        with_eth               = False, eth_sfp=0, eth_phy="1000basex", eth_local_ip="192.168.1.50", eth_udp_port=2345,
+        with_sata              = False, sata_gen="gen2",
+        with_white_rabbit      = False,
+        with_jtagbone          = True,
+        with_rfic_oversampling = False,
     ):
         # Platform ---------------------------------------------------------------------------------
 
@@ -176,16 +217,18 @@ class BaseSoC(SoCMini):
 
         # General.
         self.crg = CRG(platform, sys_clk_freq,
-            with_eth  = with_eth,
-            with_sata = with_sata,
+            with_eth          = with_eth,
+            with_sata         = with_sata,
+            with_white_rabbit = with_white_rabbit,
         )
 
         # Shared QPLL.
         self.qpll = SharedQPLL(platform,
-            with_pcie = with_pcie,
-            with_eth  = with_eth,
-            eth_phy   = eth_phy,
-            with_sata = with_sata,
+            with_pcie       = with_pcie,
+            with_eth        = with_eth | with_white_rabbit,
+            eth_phy         = eth_phy,
+            eth_refclk_freq = {True: 125e6, False: 156.25e6}[with_white_rabbit],
+            with_sata       = with_sata,
         )
 
         # Capability -------------------------------------------------------------------------------
@@ -295,6 +338,7 @@ class BaseSoC(SoCMini):
             self.pcie_phy = S7PCIEPHY(platform, platform.request(f"pcie_x{pcie_lanes}_{variant}"),
                 data_width  = {1: 64, 2: 64, 4: 128}[pcie_lanes],
                 bar0_size   = 0x20000,
+                with_ptm    = with_pcie_ptm,
                 cd          = "sys",
             )
             self.comb += ClockSignal("refclk_pcie").eq(self.pcie_phy.pcie_refclk)
@@ -312,10 +356,20 @@ class BaseSoC(SoCMini):
                 with_dma_buffering    = True, dma_buffering_depth=8192,
                 with_dma_loopback     = True,
                 with_dma_synchronizer = True,
-                with_msi              = True
+                with_msi              = True,
+                with_ptm              = with_pcie_ptm,
             )
             self.pcie_phy.use_external_qpll(qpll_channel=self.qpll.get_channel("pcie"))
             self.comb += self.pcie_dma0.synchronizer.pps.eq(pps_rise)
+            if with_pcie_ptm:
+                # TODO:
+                # - Connect Time.
+                # - Integrate Driver.
+                # - Test phc2sys Host <-> Board regulation.
+                if pcie_lanes != 1:
+                    raise NotImplementedError("PCIe PTM only supported in PCIe Gen2 X1 for now.")
+                from litex_wr_nic.gateware.soc import LiteXWRNICSoC
+                LiteXWRNICSoC.add_pcie_ptm(self)
 
         # Ethernet ---------------------------------------------------------------------------------
 
@@ -470,33 +524,181 @@ class BaseSoC(SoCMini):
         # Use GPIO0 as ClkIn.
         self.comb += si5351_clk_in.eq(self.gpio.i_async[0])
 
+        # White Rabbit -----------------------------------------------------------------------------
+
+        if with_white_rabbit:
+
+            from litex.soc.cores.uart import UARTPHY, UART
+
+            from litex_wr_nic.gateware.soc  import LiteXWRNICSoC
+
+            # IOs.
+            # ----
+
+            _sfp_i2c_io = [
+                ("sfp_i2c", 0,
+                    Subsignal("sda",  Pins("M2:SMB_DAT")),
+                    Subsignal("scl",  Pins("M2:SMB_CLK")),
+                    IOStandard("LVCMOS33"),
+                ),
+            ]
+            platform.add_extension(_sfp_i2c_io)
+
+            # UART.
+            # -----
+
+            class UARTPads:
+                def __init__(self):
+                    self.tx = Signal()
+                    self.rx = Signal()
+
+            self.uart_xover_pads = UARTPads()
+            self.shared_pads     = UARTPads()
+            self.uart_xover_phy  = UARTPHY(self.uart_xover_pads, clk_freq=sys_clk_freq, baudrate=115200)
+            self.uart_xover      = UART(self.uart_xover_phy, rx_fifo_depth=128, rx_fifo_rx_we=True)
+
+            self.comb += [
+                self.uart_xover_pads.rx.eq(self.shared_pads.tx),
+                self.shared_pads.rx.eq(self.uart_xover_pads.tx),
+            ]
+
+            # Core Instance.
+            # --------------
+            sfp_i2c_pads = platform.request("sfp_i2c")
+            LiteXWRNICSoC.add_wr_core(self,
+                # CPU.
+                cpu_firmware    = "../litex_wr_nic/litex_wr_nic/firmware/spec_a7_wrc.bram", # FIXME: Avoid hardcoded path.
+
+                # Board name.
+                board_name       = "SAWR",
+
+                # SFP.
+                sfp_pads        = platform.request("sfp", 0),
+                sfp_i2c_pads    = sfp_i2c_pads,
+                sfp_tx_polarity = 0, # Inverted on M2SDR and Acorn Baseboard Mini.
+                sfp_rx_polarity = 1, # Inverted on M2SDR.
+
+                # QPLL.
+                qpll            = self.qpll,
+                with_ext_clk    = False,
+
+                # Serial.
+                serial_pads     = self.shared_pads,
+            )
+            LiteXWRNICSoC.add_sources(self)
+
+            # Clk10M Generator.
+            # -----------------
+
+            self.syncout_pll = syncout_pll = S7MMCM(speedgrade=-2)
+            self.comb += syncout_pll.reset.eq(ResetSignal("wr"))
+            syncout_pll.register_clkin(ClockSignal("wr"), 62.5e6)
+            syncout_pll.create_clkout(self.crg.cd_clk10, 10e6, margin=0, phase=0)
+
+            # RefClk MMCM Phase Shift.
+            # ------------------------
+            self.refclk_mmcm_ps_gen = Instance("ps_gen",
+                p_WIDTH       = 16,
+                p_DIV         = 16,
+                p_MULT        = 7,
+
+                i_pswidth     = self.dac_refclk_data,
+                i_pswidth_set = self.dac_refclk_load,
+                i_pswidth_clk = ClockSignal("wr"),
+
+                i_psclk       = ClockSignal("clk100"),
+                i_psdone      = self.crg.refclk_mmcm.psdone,
+                o_psen        = self.crg.refclk_mmcm.psen,
+                o_psincdec    = self.crg.refclk_mmcm.psincdec,
+            )
+
+            # DMTD MMCM Phase Shift.
+            # ----------------------
+            self.dac_mmcm_ps_gen = Instance("ps_gen",
+                p_WIDTH       = 16,
+                p_DIV         = 16,
+                p_MULT        = 7,
+
+                i_pswidth     = self.dac_dmtd_data,
+                i_pswidth_set = self.dac_dmtd_load,
+                i_pswidth_clk = ClockSignal("wr"),
+
+                i_psclk       = ClockSignal("clk100"),
+                i_psdone      = self.crg.dmtd_mmcm.psdone,
+                o_psen        = self.crg.dmtd_mmcm.psen,
+                o_psincdec    = self.crg.dmtd_mmcm.psincdec,
+            )
+
+            # Timings Constraints.
+            # --------------------
+            platform.add_platform_command("set_property SEVERITY {{Warning}} [get_drc_checks REQP-123]") # FIXME: Add 10MHz Ext Clk.
+            platform.add_platform_command("create_clock -name wr_txoutclk -period 16.000 [get_pins -hierarchical *gtpe2_i/TXOUTCLK]")
+            platform.add_platform_command("create_clock -name wr_rxoutclk -period 16.000 [get_pins -hierarchical *gtpe2_i/RXOUTCLK]")
+
+
         # Timing Constraints/False Paths -----------------------------------------------------------
 
-        platform.add_false_path_constraints(
-            # PCIe.
-            #"main_s7pciephy_clkout0", # FIXME.
-            #"main_s7pciephy_clkout1", # FIXME.
-            #"main_s7pciephy_clkout2", # FIXME.
-            #"main_s7pciephy_clkout3", # FIXME.
 
-            # CRG.
-            "clk100",
-            "{{*crg_clkout0}}",
-            "{{*crg_clkout1}}",
+        if with_white_rabbit:
+            platform.add_false_path_constraints(
+                # PCIe.
+                #"main_s7pciephy_clkout0", # FIXME.
+                #"main_s7pciephy_clkout1", # FIXME.
+                #"main_s7pciephy_clkout2", # FIXME.
+                #"main_s7pciephy_clkout3", # FIXME.
 
-            # RFIC.
-            "rfic_clk",
+                # CRG.
+                "clk100",
+                "clk_sys",
+                "{{*crg_s7pll_clkout0}}",
+                "{{*crg_s7pll_clkout1}}",
 
-            # Internal Primitives.
-            "dna_clk",
-            "jtag_clk",
-            "icap_clk",
+                # RFIC.
+                "rfic_clk",
 
-            # Sync.
-            "si5351_clk0",
-            "si5351_clk1",
-            "sync_clk_in",
-        )
+                # Internal Primitives.
+                "dna_clk",
+                "jtag_clk",
+                "icap_clk",
+
+                # Sync.
+                "si5351_clk0",
+                "si5351_clk1",
+                "sync_clk_in",
+
+                # White Rabbit.
+                "wr_rxoutclk",
+                "wr_txoutclk",
+                "{{*crg_s7mmcm0_clkout}}",
+                "{{*crg_s7mmcm1_clkout}}",
+            )
+        else:
+            platform.add_false_path_constraints(
+                # PCIe.
+                #"main_s7pciephy_clkout0", # FIXME.
+                #"main_s7pciephy_clkout1", # FIXME.
+                #"main_s7pciephy_clkout2", # FIXME.
+                #"main_s7pciephy_clkout3", # FIXME.
+
+                # CRG.
+                "clk100",
+                "{{*crg_clkout0}}",
+                "{{*crg_clkout1}}",
+
+                # RFIC.
+                "rfic_clk",
+
+                # Internal Primitives.
+                "dna_clk",
+                "jtag_clk",
+                "icap_clk",
+
+                # Sync.
+                "si5351_clk0",
+                "si5351_clk1",
+                "sync_clk_in",
+            )
+
         platform.add_platform_command("set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets {{*crg_s7pll0_clkout_buf1}}]")
 
         # Clk Measurements -------------------------------------------------------------------------
@@ -578,6 +780,7 @@ def main():
 
     # PCIe parameters.
     parser.add_argument("--with-pcie",       action="store_true", help="Enable PCIe Communication.")
+    parser.add_argument("--with-pcie-ptm",   action="store_true", help="Enable PCIe PTM.")
     parser.add_argument("--pcie-lanes",      default=1, type=int, help="PCIe Lanes.", choices=[1, 2, 4])
 
     # Ethernet parameters.
@@ -590,6 +793,9 @@ def main():
     # SATA parameters.
     parser.add_argument("--with-sata",       action="store_true",     help="Enable SATA Storage.")
 
+    # White Rabbit parameters.
+    parser.add_argument("--with-white-rabbit", action="store_true",     help="Enable White-Rabbit Support (on SFP0).")
+
     # Litescope Analyzer Probes.
     probeopts = parser.add_mutually_exclusive_group()
     probeopts.add_argument("--with-ad9361-spi-probe",      action="store_true", help="Enable AD9361 SPI Probe.")
@@ -599,6 +805,13 @@ def main():
 
     args = parser.parse_args()
 
+    # Build White Rabbit Firmware.
+    if args.with_white_rabbit & args.build:
+        print("Building White Rabbit firmware...")
+        r = os.system("cd ../litex_wr_nic/litex_wr_nic/firmware && ./build.py --target acorn") # FIXME: Avoid harcoded path/platform.
+        if r != 0:
+            raise RuntimeError("White Rabbit Firmware build failed.")
+
     # Build SoC.
     soc = BaseSoC(
         # Generic.
@@ -606,6 +819,7 @@ def main():
 
         # PCIe.
         with_pcie     = args.with_pcie,
+        with_pcie_ptm = args.with_pcie_ptm,
         pcie_lanes    = args.pcie_lanes,
 
         # Ethernet.
@@ -617,6 +831,9 @@ def main():
 
         # SATA.
         with_sata     = args.with_sata,
+
+        # White Rabbit.
+        with_white_rabbit = args.with_white_rabbit,
     )
 
     # LiteScope Analyzer Probes.
@@ -636,6 +853,8 @@ def main():
             r += f"_pcie_x{args.pcie_lanes}"
         if args.with_eth:
             r += f"_eth"
+        if args.with_white_rabbit:
+            r += f"_white_rabbit"
         return r
 
     builder = Builder(soc, output_dir=os.path.join("build", get_build_name()), csr_csv="csr.csv")

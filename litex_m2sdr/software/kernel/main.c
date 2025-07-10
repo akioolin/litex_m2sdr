@@ -1002,6 +1002,9 @@ static int litepcie_pci_probe(struct pci_dev *dev, const struct pci_device_id *i
 	int i;
 	char fpga_identifier[256];
 	struct litepcie_device *litepcie_dev = NULL;
+#ifdef CSR_UART_XOVER_RXTX_ADDR
+	struct resource *tty_res = NULL;
+#endif
 
 	dev_info(&dev->dev, "\e[1m[Probing device]\e[0m\n");
 
@@ -1202,6 +1205,21 @@ static int litepcie_pci_probe(struct pci_dev *dev, const struct pci_device_id *i
 		goto fail3;
 	}
 
+#ifdef CSR_UART_XOVER_RXTX_ADDR
+	tty_res = devm_kzalloc(&dev->dev, sizeof(struct resource), GFP_KERNEL);
+	if (!tty_res)
+		return -ENOMEM;
+	tty_res->start =
+		(resource_size_t) litepcie_dev->bar0_addr +
+		CSR_UART_XOVER_RXTX_ADDR - CSR_BASE;
+	tty_res->flags = IORESOURCE_REG;
+	litepcie_dev->uart = platform_device_register_simple("liteuart", litepcie_minor_idx, tty_res, 1);
+	if (IS_ERR(litepcie_dev->uart)) {
+		ret = PTR_ERR(litepcie_dev->uart);
+		goto fail3;
+	}
+#endif
+
 	return 0;
 
 fail3:
@@ -1234,7 +1252,9 @@ static void litepcie_pci_remove(struct pci_dev *dev)
 		free_irq(irq, litepcie_dev);
 	}
 
+#ifdef CSR_UART_XOVER_RXTX_ADDR
 	platform_device_unregister(litepcie_dev->uart);
+#endif
 
 	litepcie_free_chdev(litepcie_dev);
 
